@@ -106,7 +106,7 @@ def norm_name(s):
 class Store:
     def __init__(self, path):
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-        self.db = sqlite3.connect(path)
+        self.db = sqlite3.connect(path, check_same_thread=False, timeout=30)
         self.db.executescript(SCHEMA)
         self.db.commit()
 

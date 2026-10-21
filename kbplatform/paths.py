@@ -43,28 +43,35 @@ def to_unc(path: str, drive_map: dict[str, str]) -> str:
     return norm_unc(p)
 
 
-def split_share(unc: str, roots: list[str]) -> tuple[str, str]:
+def split_share(unc: str, roots: list[str] | None = None) -> tuple[str, str]:
     """返回 (共享名, 共享内相对路径)。
 
-    roots 为已知监控根（UNC 列表），取**最长匹配**；未命中时退化为
-    取 UNC 的第 3 段作共享名。
+    共享名取 UNC 的第 2 段（``\\\\server\\share\\...``），
+    相对路径是共享名之后的全部内容。**与监控根无关**——
+    监控根可能指向共享内的子目录（如 ``\\信息化管理\\AI知识库``），
+    但共享名始终是 ``信息化管理``，相对路径始终是 ``AI知识库\\x.pdf``。
+    这正是权限模型 (share, subpath) 需要的形式。
+
+    roots 保留为可选参数仅为兼容旧调用；判断是否在监控范围内请用 is_under_root。
     """
     u = norm_unc(unc)
-    best: tuple[str, str] | None = None
-    for r in roots:
-        rn = norm_unc(r)
-        if rn and u.lower().startswith(rn.lower() + "\\"):
-            if best is None or len(rn) > len(best[0]):
-                best = (rn, u[len(rn) + 1:])
-    if best:
-        return best[0].split("\\")[-1], best[1]
     segs = [s for s in u.split("\\") if s != ""]
-    # UNC 去掉空段后：segs[0]=服务器, segs[1]=共享名, segs[2:]=共享内相对路径
+    # UNC: segs[0]=服务器, segs[1]=共享名, segs[2:]=共享内相对路径
     if len(segs) >= 3:
         return segs[1], "\\".join(segs[2:])
     if len(segs) == 2:
         return segs[1], ""
     return "", u
+
+
+def is_under_root(unc: str, roots: list[str]) -> bool:
+    """路径是否位于任一监控根之下（按目录边界匹配）。"""
+    u = norm_unc(unc).lower()
+    for r in roots or []:
+        rn = norm_unc(r).lower()
+        if rn and (u == rn or u.startswith(rn + "\\")):
+            return True
+    return False
 
 
 def path_key(unc: str) -> str:

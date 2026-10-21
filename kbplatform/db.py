@@ -176,9 +176,14 @@ CREATE TABLE IF NOT EXISTS model_usage (
 
 def connect(db_path: str) -> sqlite3.Connection:
     os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
-    conn = sqlite3.connect(db_path, timeout=30)
+    # check_same_thread=False：FastAPI 的同步端点跑在 anyio 线程池里，
+    # 连接在主线程创建会导致 "SQLite objects created in a thread can only
+    # be used in that same thread"。CPython 的 sqlite3 在 Windows 上是
+    # SERIALIZED 模式，多线程共用一个连接是安全的。
+    conn = sqlite3.connect(db_path, timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=15000")
     return conn
 
 

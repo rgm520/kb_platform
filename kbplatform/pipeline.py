@@ -23,6 +23,18 @@ class Pipeline:
         self.monitor = Monitor(self.conn, config.monitor_roots, config.drive_map,
                                qps=config.scan_qps,
                                poll_interval=config.poll_interval_sec)
+        self._warm_snapshot()
+
+    def _warm_snapshot(self) -> None:
+        """用 catalog 表里已完成的记录预热监控快照。
+
+        监控快照在内存里，服务重启后会丢，导致**全部文件被当成新增重跑一遍**
+        （每个文件 30 秒 LLM 提炼，代价很大）。这里在启动时用 catalog 回填。
+        """
+        rows = self.conn.execute(
+            "SELECT path, size, mtime FROM catalog WHERE tier1_done=1").fetchall()
+        for r in rows:
+            self.monitor._snapshot[r[0]] = (r[1] or 0, r[2] or 0.0)
 
     # ------------------------------------------------------------ 单轮
     def run_once(self) -> dict:
