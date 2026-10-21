@@ -110,6 +110,17 @@ class Store:
         self.db.executescript(SCHEMA)
         self.db.commit()
 
+    @classmethod
+    def from_conn(cls, conn):
+        """包装一个已有的连接。
+
+        平台层（kbplatform）自己管连接与 schema，但 kb.graph 期望 Store 的
+        形状（upsert_node / add_edge / commit），用这个入口避免重复 SQL。
+        """
+        obj = cls.__new__(cls)
+        obj.db = conn
+        return obj
+
     # ---------------- files ----------------
     def seen(self, path):
         r = self.db.execute("SELECT fingerprint, status FROM files WHERE path=?", (path,)).fetchone()
