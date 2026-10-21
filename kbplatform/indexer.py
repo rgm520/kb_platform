@@ -7,7 +7,9 @@
 """
 from __future__ import annotations
 
+import os
 import sqlite3
+import tempfile
 import time
 from dataclasses import dataclass
 
@@ -16,6 +18,7 @@ import kb.llm as llm
 import kb.parsers as parsers
 
 from kbplatform import fts
+from kbplatform.converters import LEGACY_EXT, SCAN_EXT, convert_legacy, ocr_pdf
 from kbplatform.db import set_status
 from kbplatform.monitor import Change
 
@@ -77,10 +80,37 @@ def _insert_chunks(conn: sqlite3.Connection, file_path: str, chunks: list[dict])
 
 
 def index_file(conn: sqlite3.Connection, fts_path: str, vs, catalog_id: int,
-               unc_path: str, embed_model: str = "bge-m3") -> IndexResult:
-    """把一个文件变成可检索的块。失败时返回 ok=False 并记录原因。"""
+               unc_path: str, embed_model: str = "bge-m3",
+               convert_dir: str | None = None) -> IndexResult:
+    """把一个文件变成可检索的块。失败时返回 ok=False 并记录原因。
+
+    老格式（.doc/.ppt/.xls）先经 LibreOffice 转换；扫描件 PDF 先经 OCR。
+    转换器/OCR 不可用时**不报错**，而是标记为「待支持」并继续。
+    """
+    parse_target = unc_path
+    ext = os.path.splitext(unc_path)[1].lower()
+    tmpdir = convert_dir or tempfile.gettempdir()
+
+    if ext in LEGACY_EXT:
+        converted = convert_legacy(unc_path, tmpdir)
+        if not converted:
+            return _fail(conn, catalog_id,
+                         "老格式待支持（LibreOffice 不可用或转换失败）")
+        parse_target = converted
+    elif ext in SCAN_EXT:
+        # 先按普通 PDF 解析；若判定为扫描件再走 OCR
+        try:
+            _blocks, meta0 = parsers.parse_file(unc_path)
+        except Exception:
+            meta0 = {}
+        if meta0.get("need_ocr"):
+            ocr_txt = ocr_pdf(unc_path, tmpdir)
+            if not ocr_txt:
+                return _fail(conn, catalog_id, "扫描件待 OCR 支持")
+            parse_target = ocr_txt
+
     try:
-        blocks, meta = parsers.parse_file(unc_path)
+        blocks, meta = parsers.parse_file(parse_target)
     except Exception as e:
         return _fail(conn, catalog_id, f"解析失败: {type(e).__name__}: {e}")
 
