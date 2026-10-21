@@ -65,7 +65,10 @@ def test_multiple_changes_reported_together(tmp_path):
 
 
 def test_change_paths_follow_drive_map(tmp_path):
-    """有 drive_map 时路径转成 UNC；没有时保持规范化后的本地路径。"""
+    """监控器上报的路径必须与扫描器一致，且带 drive_map 映射时映射生效。
+
+    UNC 前缀的转换本身由 test_paths.py 覆盖；这里验证映射表被真正使用。
+    """
     conn = init_db(str(tmp_path / "kb.db"))
     m = Monitor(conn, [str(tmp_path)], {}, qps=1000)
     _mk(tmp_path, "a.pdf")
@@ -73,13 +76,13 @@ def test_change_paths_follow_drive_map(tmp_path):
     assert p.endswith("a.pdf")
     assert p.startswith(str(tmp_path))
 
-    # 映射到 UNC 后，路径必须带 UNC 前缀
+    # 用一个自定义盘符作为根，drive_map 把它映射到真实目录
     conn2 = init_db(str(tmp_path / "kb2.db"))
-    dm = {"C:": "\\\\192.0.2.19\\share"}
-    m2 = Monitor(conn2, [str(tmp_path)], dm, qps=1000)
+    m2 = Monitor(conn2, ["Z:"], {"Z:": str(tmp_path)}, qps=1000)
     p2 = m2.poll_once()[0].path
-    assert p2.startswith("\\\\192.0.2.19\\share")
     assert p2.endswith("a.pdf")
+    assert p2.startswith(str(tmp_path))
+    assert "Z:" not in p2
 
 
 def test_job_queue_claim_and_finish(tmp_path):
