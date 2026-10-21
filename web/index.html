@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>企业知识平台</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="app">
+  <!-- 登录 -->
+  <div id="login" class="login-wrap hidden">
+    <form id="login-form" class="card login-card">
+      <h1>企业知识平台</h1>
+      <p class="muted">用公司分配的账号登录</p>
+      <label>用户名<input id="login-user" autocomplete="username" required></label>
+      <label>密码<input id="login-pass" type="password" autocomplete="current-password" required></label>
+      <button type="submit" class="primary">登录</button>
+      <div id="login-err" class="err"></div>
+    </form>
+  </div>
+
+  <!-- 主界面 -->
+  <div id="main" class="hidden">
+    <header class="topbar">
+      <div class="brand">企业知识平台</div>
+      <nav id="nav">
+        <a href="#/board" data-p="board">文档看板</a>
+        <a href="#/graph" data-p="graph">知识图谱</a>
+        <a href="#/ask" data-p="ask">AI 问答</a>
+        <a href="#/admin" data-p="admin" class="admin-only">管理台</a>
+      </nav>
+      <div class="right">
+        <span id="who" class="muted"></span>
+        <button id="logout" class="ghost">退出</button>
+      </div>
+    </header>
+
+    <!-- 看板 -->
+    <section id="p-board" class="page">
+      <div id="stat-cards" class="cards"></div>
+      <div class="toolbar">
+        <select id="f-status"><option value="">全部状态</option><option value="done">已解析</option>
+          <option value="pending">待处理</option><option value="failed">失败</option><option value="skipped">已跳过</option></select>
+        <input id="f-share" placeholder="按共享筛选（模糊）">
+        <button id="btn-refresh">刷新</button>
+        <span id="doc-total" class="muted"></span>
+      </div>
+      <div class="table-wrap">
+        <table id="doc-table">
+          <thead><tr><th>文件</th><th>共享</th><th>类型</th><th>状态</th><th>两层进度</th><th>块</th><th>知识点</th><th>更新时间</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="pager"><button id="pg-prev">上一页</button><span id="pg-info"></span><button id="pg-next">下一页</button></div>
+    </section>
+
+    <!-- 图谱 -->
+    <section id="p-graph" class="page">
+      <div class="toolbar">
+        <input id="g-q" placeholder="搜索实体 / 知识点名称">
+        <button id="g-search">搜索节点</button>
+        <label class="chk"><input type="checkbox" id="g-entity" checked>实体</label>
+        <label class="chk"><input type="checkbox" id="g-kp" checked>知识点</label>
+        <label class="chk"><input type="checkbox" id="g-cat" checked>分类</label>
+        <span class="muted">点击节点展开邻居</span>
+      </div>
+      <div class="graph-wrap">
+        <div id="cy"></div>
+        <aside id="g-side"><p class="muted">选择左侧节点查看详情</p></aside>
+      </div>
+      <div id="g-list" class="g-list"></div>
+    </section>
+
+    <!-- 问答 -->
+    <section id="p-ask" class="page">
+      <div class="ask-wrap">
+        <div class="ask-bar">
+          <select id="a-model"></select>
+          <input id="a-q" placeholder="例如：三级及以下子企业能不能自建数据机房？">
+          <button id="a-go" class="primary">提问</button>
+        </div>
+        <div id="a-notice" class="notice hidden"></div>
+        <div id="a-answer" class="answer"></div>
+        <div id="a-cites" class="cites"></div>
+        <div class="ask-samples">
+          <span class="muted">试试：</span>
+          <a href="#" data-q="核心业务信息化具体包括哪些业务领域？">核心业务信息化包括哪些业务领域</a>
+          <a href="#" data-q="哪些系统不得单独建设，须统一使用？">哪些系统不得单独建设</a>
+          <a href="#" data-q="软件正版化率要求是多少？">软件正版化率要求</a>
+          <a href="#" data-q="信息化项目全生命周期包含哪些阶段？">项目全生命周期</a>
+        </div>
+      </div>
+    </section>
+
+    <!-- 管理台 -->
+    <section id="p-admin" class="page">
+      <div class="tabs">
+        <button data-t="users" class="active">用户与权限</button>
+        <button data-t="restricted">涉密目录</button>
+        <button data-t="models">模型配置</button>
+        <button data-t="tokens">API 密钥</button>
+        <button data-t="agents">已接入智能体</button>
+        <button data-t="audit">调用审计</button>
+      </div>
+      <div id="admin-body" class="admin-body"></div>
+    </section>
+  </div>
+</div>
+
+<div id="modal" class="modal hidden"><div class="modal-card"><div id="modal-body"></div>
+  <div class="modal-foot"><button id="modal-close">关闭</button></div></div></div>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="/static/vendor/cytoscape.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

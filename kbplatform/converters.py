@@ -71,13 +71,51 @@ def convert_legacy(unc_path: str, out_dir: str) -> str | None:
     return None
 
 
+def _make_ocr():
+    """构造 PaddleOCR 实例。兼容 3.x 与 2.x 的构造参数差异。"""
+    from paddleocr import PaddleOCR
+    try:  # PaddleOCR 3.x
+        return PaddleOCR(use_doc_orientation_classify=False,
+                          use_doc_unwarping=False,
+                          use_textline_orientation=False,
+                          lang="ch")
+    except TypeError:  # PaddleOCR 2.x
+        return PaddleOCR(use_angle_cls=True, lang="ch", show_log=False)
+
+
+def _extract_lines(result) -> list[str]:
+    """从 PaddleOCR 的结果里取出文本行。兼容 3.x 与 2.x。"""
+    lines: list[str] = []
+    if result is None:
+        return lines
+    # 3.x: result.json -> {'res': {'rec_texts': [...]}}
+    j = getattr(result, "json", None)
+    if j is None and isinstance(result, dict):
+        j = result
+    if isinstance(j, dict):
+        res = j.get("res", j)
+        texts = res.get("rec_texts")
+        if texts:
+            return [str(t) for t in texts if str(t).strip()]
+    # 2.x: [[box, (text, score)], ...]
+    try:
+        for line in result:
+            if line and len(line) > 1 and line[1]:
+                txt = line[1][0]
+                if isinstance(txt, (list, tuple)):
+                    txt = "".join(str(x) for x in txt)
+                lines.append(str(txt))
+    except Exception:
+        pass
+    return lines
+
+
 def ocr_pdf(unc_path: str, out_dir: str) -> str | None:
     """扫描件 PDF -> 纯文本 .txt。成功返回文本路径，失败返回 None。"""
     if not ocr_available():
         return None
     try:
         import pymupdf
-        from paddleocr import PaddleOCR
     except Exception:
         return None
     try:
@@ -88,7 +126,7 @@ def ocr_pdf(unc_path: str, out_dir: str) -> str | None:
 
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     try:
-        ocr = PaddleOCR(use_angle_cls=True, lang="ch", show_log=False)
+        ocr = _make_ocr()
     except Exception:
         return None
 
@@ -99,14 +137,17 @@ def ocr_pdf(unc_path: str, out_dir: str) -> str | None:
             pix = page.get_pixmap(dpi=200)
             img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
             arr = np.array(img)
-            res = ocr.ocr(arr, cls=True)
-            for line in (res[0] or []) if res else []:
-                if line and len(line) > 1 and line[1]:
-                    chunks.append(" ".join(str(x) for x in line[1][0]))
+            try:  # 3.x
+                results = ocr.predict(arr)
+            except AttributeError:  # 2.x
+                results = ocr.ocr(arr, cls=True)
+            for r in (results or []):
+                chunks.extend(_extract_lines(r))
         doc.close()
     except Exception:
         return None
 
+    chunks = [c.strip() for c in chunks if c and c.strip()]
     if not chunks:
         return None
     out = Path(out_dir) / (Path(unc_path).stem + ".ocr.txt")
