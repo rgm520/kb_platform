@@ -1,0 +1,64 @@
+"""任务队列。
+
+claim() 用一条 UPDATE 原子取任务，避免多 worker 抢同一个任务。
+"""
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass
+
+
+@dataclass
+class Job:
+    id: int
+    kind: str          # index | extract
+    catalog_id: int
+    state: str
+    error: str | None
+
+
+class JobQueue:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def enqueue(self, kind: str, catalog_id: int) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO jobs(kind, catalog_id, state, attempts, created_at)"
+            " VALUES (?,?,'queued',0,?)",
+            (kind, catalog_id, time.time()))
+        self.conn.commit()
+        return cur.lastrowid
+
+    def claim(self) -> Job | None:
+        row = self.conn.execute(
+            "SELECT id, kind, catalog_id, state, error FROM jobs "
+            "WHERE state='queued' ORDER BY id LIMIT 1").fetchone()
+        if not row:
+            return None
+        self.conn.execute(
+            "UPDATE jobs SET state='running', started_at=?, attempts=attempts+1 WHERE id=?",
+            (time.time(), row[0]))
+        self.conn.commit()
+        return Job(row[0], row[1], row[2], row[3], row[4])
+
+    def finish(self, job_id: int, error: str | None = None) -> None:
+        if error:
+            self.conn.execute(
+                "UPDATE jobs SET state='failed', error=?, finished_at=? WHERE id=?",
+                (error, time.time(), job_id))
+        else:
+            self.conn.execute(
+                "UPDATE jobs SET state='done', error=NULL, finished_at=? WHERE id=?",
+                (time.time(), job_id))
+        self.conn.commit()
+
+    def requeue_stale(self) -> int:
+        """把卡在 running 的任务（进程崩了）放回队列。"""
+        cur = self.conn.execute(
+            "UPDATE jobs SET state='queued' WHERE state='running'")
+        self.conn.commit()
+        return cur.rowcount
+
+    def pending_count(self) -> int:
+        return self.conn.execute(
+            "SELECT COUNT(*) FROM jobs WHERE state IN ('queued','running')").fetchone()[0]
