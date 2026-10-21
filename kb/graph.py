@@ -199,6 +199,28 @@ def canonicalize_entities(store, threshold=0.92, use_llm=True, max_pairs=40,
             "processed": len(rows)}
 
 
+def prune_orphans(store):
+    """清理没有边的孤立节点与指向已删节点的边。
+
+    重跑提炼会产生上一轮的知识点节点（标题微变就是新节点），不清掉会让
+    图谱节点数虚高。全库重建的知识点/实体节点同理。
+    """
+    db = _db(store)
+    db.execute("DELETE FROM edges WHERE src NOT IN (SELECT id FROM nodes) "
+               "OR dst NOT IN (SELECT id FROM nodes)")
+    db.execute("DELETE FROM nodes WHERE type='knowledge_point' "
+               "AND id NOT IN (SELECT src FROM edges) AND id NOT IN (SELECT dst FROM edges)")
+    db.execute("DELETE FROM nodes WHERE type='entity' "
+               "AND id NOT IN (SELECT src FROM edges) AND id NOT IN (SELECT dst FROM edges)")
+    db.execute("DELETE FROM nodes WHERE type='category' "
+               "AND id NOT IN (SELECT src FROM edges) AND id NOT IN (SELECT dst FROM edges)")
+    db.commit()
+    return dict(
+        nodes=db.execute("SELECT COUNT(*) FROM nodes").fetchone()[0],
+        edges=db.execute("SELECT COUNT(*) FROM edges").fetchone()[0],
+    )
+
+
 def recount_mentions(store):
     """按 knowledge 表重算实体/知识点提及次数。
 

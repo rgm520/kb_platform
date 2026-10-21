@@ -56,6 +56,14 @@ def _delete_artifacts(conn: sqlite3.Connection, fts_path: str, vs, file_path: st
 
 
 def _insert_chunks(conn: sqlite3.Connection, file_path: str, chunks: list[dict]) -> list[int]:
+    """替换某文件的块。旧的块连同其 knowledge / edges / vectors 必须一起清掉，
+    否则重跑会产生孤儿知识（knowledge 行数多于 chunks 数）与重复图谱节点。"""
+    old_ids = _chunks_of(conn, file_path)
+    if old_ids:
+        marks = ",".join("?" * len(old_ids))
+        conn.execute(f"DELETE FROM vectors WHERE chunk_id IN ({marks})", old_ids)
+        conn.execute(f"DELETE FROM knowledge WHERE chunk_id IN ({marks})", old_ids)
+        conn.execute(f"DELETE FROM edges WHERE chunk_id IN ({marks})", old_ids)
     conn.execute("DELETE FROM chunks WHERE file_path=?", (file_path,))
     ids = []
     for c in chunks:

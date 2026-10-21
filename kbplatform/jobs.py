@@ -29,10 +29,20 @@ class JobQueue:
         self.conn.commit()
         return cur.lastrowid
 
-    def claim(self) -> Job | None:
-        row = self.conn.execute(
-            "SELECT id, kind, catalog_id, state, error FROM jobs "
-            "WHERE state='queued' ORDER BY id LIMIT 1").fetchone()
+    def claim(self, kind: str | None = None) -> Job | None:
+        """原子取一个任务。
+
+        kind 过滤是必需的：Tier 1 完成后会立刻入队 Tier 2 的任务，
+        若不按类型过滤，Tier 2 任务会被 Tier 1 的循环领走而跳过执行。
+        """
+        if kind:
+            row = self.conn.execute(
+                "SELECT id, kind, catalog_id, state, error FROM jobs "
+                "WHERE state='queued' AND kind=? ORDER BY id LIMIT 1", (kind,)).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT id, kind, catalog_id, state, error FROM jobs "
+                "WHERE state='queued' ORDER BY id LIMIT 1").fetchone()
         if not row:
             return None
         self.conn.execute(

@@ -96,3 +96,40 @@ def test_process_changes_handles_added_modified_removed(tmp_path):
     ch2 = Change(path, "removed", 100, 1.0)
     process_changes(conn, fts_path, vs, [ch2])
     assert conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] == 0
+
+
+def test_reindex_does_not_leave_orphan_knowledge(tmp_path):
+    """重跑索引必须清掉旧块的 knowledge / edges，否则 knowledge 行数会多于 chunks。"""
+    conn, fts_path, vs, cid, path = _setup(tmp_path)
+    index_file(conn, fts_path, vs, cid, path)
+    old_chunk_ids = [r[0] for r in conn.execute("SELECT id FROM chunks").fetchall()]
+    marks = ",".join("?" * len(old_chunk_ids))
+    conn.execute(f"INSERT INTO knowledge(file_path, chunk_id, summary, key_points, relations, raw, created_at)"
+                 " VALUES (?,?,'s','[]','[]','{}',0)", (path, old_chunk_ids[0]))
+    conn.commit()
+    assert conn.execute("SELECT COUNT(*) FROM knowledge").fetchone()[0] == 1
+
+    index_file(conn, fts_path, vs, cid, path)
+    n_knowledge = conn.execute("SELECT COUNT(*) FROM knowledge").fetchone()[0]
+    n_chunks = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+    assert n_knowledge <= n_chunks
+    orphan = conn.execute(
+        "SELECT COUNT(*) FROM knowledge WHERE chunk_id NOT IN (SELECT id FROM chunks)").fetchone()[0]
+    assert orphan == 0
+
+
+def test_prune_orphans_removes_nodes_without_edges(tmp_path):
+    import kb.graph as g
+    conn, fts_path, vs, cid, path = _setup(tmp_path)
+    conn.execute("INSERT INTO nodes(name,norm,type) VALUES ('孤点','孤点','knowledge_point')")
+    conn.execute("INSERT INTO nodes(name,norm,type) VALUES ('保留','保留','entity')")
+    conn.execute("INSERT INTO nodes(name,norm,type) VALUES ('有边','有边','entity')")
+    conn.commit()
+    a = conn.execute("SELECT id FROM nodes WHERE name='有边'").fetchone()[0]
+    b = conn.execute("SELECT id FROM nodes WHERE name='保留'").fetchone()[0]
+    conn.execute("INSERT INTO edges(src,dst,rel,weight) VALUES (?,?,'r',1)", (a, b))
+    conn.commit()
+    g.prune_orphans(conn)
+    names = {r[0] for r in conn.execute("SELECT name FROM nodes")}
+    assert "孤点" not in names
+    assert "保留" in names and "有边" in names
