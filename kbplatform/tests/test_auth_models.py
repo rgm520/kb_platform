@@ -85,6 +85,69 @@ def test_set_scopes_replaces_previous(tmp_path):
     assert [tuple(r) for r in rows] == [("B", "y")]
 
 
+# ---------------------------------------------------------------- 改密
+def test_change_password_requires_correct_old_password(tmp_path):
+    from kbplatform.auth import change_password
+    conn = init_db(str(tmp_path / "kb.db"))
+    uid = create_user(conn, "heidi", "oldpass123")
+    ok, msg = change_password(conn, uid, "wrong", "newpass456")
+    assert ok is False and "原密码" in msg
+    assert verify_login(conn, "heidi", "oldpass123") is not None
+
+
+def test_change_password_rejects_short_password(tmp_path):
+    from kbplatform.auth import change_password
+    conn = init_db(str(tmp_path / "kb.db"))
+    uid = create_user(conn, "ivan", "oldpass123")
+    ok, msg = change_password(conn, uid, "oldpass123", "short")
+    assert ok is False
+    assert verify_login(conn, "ivan", "oldpass123") is not None
+
+
+def test_change_password_rejects_same_password(tmp_path):
+    from kbplatform.auth import change_password
+    conn = init_db(str(tmp_path / "kb.db"))
+    uid = create_user(conn, "judy", "samepass123")
+    ok, _ = change_password(conn, uid, "samepass123", "samepass123")
+    assert ok is False
+
+
+def test_change_password_succeeds_and_old_stops_working(tmp_path):
+    from kbplatform.auth import change_password
+    conn = init_db(str(tmp_path / "kb.db"))
+    uid = create_user(conn, "karl", "oldpass123")
+    ok, _ = change_password(conn, uid, "oldpass123", "newpass456")
+    assert ok is True
+    assert verify_login(conn, "karl", "newpass456") is not None
+    assert verify_login(conn, "karl", "oldpass123") is None
+
+
+def test_stored_hash_never_contains_plaintext(tmp_path):
+    conn = init_db(str(tmp_path / "kb.db"))
+    uid = create_user(conn, "lena", "secretpwd1")
+    h = conn.execute("SELECT password_hash FROM users WHERE id=?", (uid,)).fetchone()[0]
+    assert "secretpwd1" not in h
+    assert h.startswith(("argon2$", "pbkdf2$"))
+
+
+# ---------------------------------------------------------------- 密钥
+def test_purge_requires_revoked_first(tmp_path):
+    """未吊销的密钥不能直接物理删除——必须先吊销再删。"""
+    from kbplatform.auth import issue_token, revoke_token
+    conn = init_db(str(tmp_path / "kb.db"))
+    uid = create_user(conn, "mike", "pw123456")
+    raw, tid = issue_token(conn, uid)
+    assert resolve_token(conn, raw) is not None
+    revoke_token(conn, tid)
+    assert resolve_token(conn, raw) is None
+    # 吊销后记录仍在，便于人工核对
+    row = conn.execute("SELECT revoked FROM api_tokens WHERE id=?", (tid,)).fetchone()
+    assert row is not None and row[0] == 1
+    conn.execute("DELETE FROM api_tokens WHERE id=?", (tid,))
+    conn.commit()
+    assert conn.execute("SELECT COUNT(*) FROM api_tokens WHERE id=?", (tid,)).fetchone()[0] == 0
+
+
 # ---------------------------------------------------------------- 模型
 def test_seed_presets_is_idempotent(tmp_path):
     conn = init_db(str(tmp_path / "kb.db"))

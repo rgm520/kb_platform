@@ -73,6 +73,10 @@ class ScopeReq(BaseModel):
     scopes: list[list[str]] = Field(default_factory=list)
 
 
+class ActiveReq(BaseModel):
+    active: bool
+
+
 class TokenReq(BaseModel):
     label: Optional[str] = None
     ttl_days: int = 90
@@ -100,6 +104,11 @@ class RestrictedReq(BaseModel):
     subpath: str = ""
     restricted: bool = True
     label: Optional[str] = None
+
+
+class ChangePwdReq(BaseModel):
+    old_password: str
+    new_password: str
 
 
 def make_app(config_path: str = "D:/opencode/config.toml") -> FastAPI:
@@ -245,6 +254,18 @@ def make_app(config_path: str = "D:/opencode/config.toml") -> FastAPI:
     def api_logout(response: Response):
         response.delete_cookie(SESSION_COOKIE)
         return {"ok": True}
+
+    @app.post("/api/v1/auth/change-password")
+    def api_change_password(req: ChangePwdReq, request: Request,
+                            ctx=Depends(actor)):
+        ok, msg = auth.change_password(conn, ctx["user"]["id"],
+                                       req.old_password, req.new_password)
+        if not ok:
+            raise HTTPException(400, detail=msg)
+        audit(ctx["user"]["id"], (ctx["token_row"] or {}).get("prefix", "session"),
+              "change_password", None, None, None, False,
+              request.client.host if request.client else None)
+        return {"ok": True, "message": "密码已修改"}
 
     @app.get("/api/v1/me")
     def api_me(request: Request):
@@ -512,6 +533,22 @@ def make_app(config_path: str = "D:/opencode/config.toml") -> FastAPI:
         auth.set_scopes(conn, user_id, [(s[0], s[1]) for s in req.scopes])
         return {"ok": True, "scopes": describe_scopes(load_scopes(conn, user_id))}
 
+    @app.put("/api/v1/admin/users/{user_id}/active")
+    def admin_set_active(user_id: int, req: ActiveReq, ctx=Depends(require_admin)):
+        """启用/停用账号。
+
+        停用后该用户的 token 立刻失效（token_user 会因 active=0 报 401），
+        飞书机器人也会拒答——这是停掉一个越权账号的唯一手段。
+        收回 scope 不够：scope 只管知识库 API，管不住 agent 的 shell。
+        """
+        row = conn.execute("SELECT id FROM users WHERE id=?", (user_id,)).fetchone()
+        if row is None:
+            raise HTTPException(404, detail="用户不存在")
+        conn.execute("UPDATE users SET active=? WHERE id=?",
+                     (1 if req.active else 0, user_id))
+        conn.commit()
+        return {"ok": True, "active": bool(req.active)}
+
     @app.get("/api/v1/admin/restricted")
     def admin_restricted(ctx=Depends(require_admin)):
         rows = conn.execute("SELECT id,share,subpath,restricted,label FROM dir_scopes"
@@ -534,7 +571,7 @@ def make_app(config_path: str = "D:/opencode/config.toml") -> FastAPI:
         rows = conn.execute(
             "SELECT t.id,t.user_id,u.username,t.prefix,t.label,t.revoked,t.created_at,"
             "t.last_used_at,t.expires_at FROM api_tokens t JOIN users u ON u.id=t.user_id"
-            " ORDER BY t.id DESC").fetchall()
+            " ORDER BY t.revoked ASC, t.id DESC").fetchall()
         return {"tokens": [dict(r) for r in rows]}
 
     @app.post("/api/v1/admin/tokens")
@@ -546,7 +583,29 @@ def make_app(config_path: str = "D:/opencode/config.toml") -> FastAPI:
 
     @app.delete("/api/v1/admin/tokens/{token_id}")
     def admin_revoke_token(token_id: int, ctx=Depends(require_admin)):
-        return {"ok": auth.revoke_token(conn, token_id)}
+        """吊销密钥。幂等；已吊销的再调一次不会报错。"""
+        row = conn.execute("SELECT revoked FROM api_tokens WHERE id=?", (token_id,)).fetchone()
+        if row is None:
+            raise HTTPException(404, detail="密钥不存在")
+        auth.revoke_token(conn, token_id)
+        return {"ok": True, "revoked": True}
+
+    @app.delete("/api/v1/admin/tokens/{token_id}/purge")
+    def admin_purge_token(token_id: int, ctx=Depends(require_admin)):
+        """物理删除密钥记录。
+
+        **只允许删除已吊销的**——必须先吊销再删除，避免"点一下就永久消失"
+        而管理员自己没意识到这个 token 还在被某个智能体使用。
+        """
+        row = conn.execute("SELECT revoked, prefix, user_id FROM api_tokens WHERE id=?",
+                           (token_id,)).fetchone()
+        if row is None:
+            raise HTTPException(404, detail="密钥不存在")
+        if not row["revoked"]:
+            raise HTTPException(400, detail="请先吊销该密钥，再执行删除")
+        conn.execute("DELETE FROM api_tokens WHERE id=?", (token_id,))
+        conn.commit()
+        return {"ok": True, "deleted": True, "prefix": row["prefix"]}
 
     @app.post("/api/v1/admin/models")
     def admin_add_model(req: ModelReq, ctx=Depends(require_admin)):

@@ -160,6 +160,30 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_log(user_id, created_at);
 
+-- 飞书用户：open_id ↔ 平台账号
+CREATE TABLE IF NOT EXISTS feishu_users (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  feishu_open_id  TEXT UNIQUE NOT NULL,
+  feishu_union_id TEXT,
+  feishu_name     TEXT,
+  user_id         INTEGER,
+  created_at      REAL,
+  last_seen_at    REAL
+);
+
+-- 飞书会话：每个 (飞书用户, 群/会话) 一个 opencode session
+CREATE TABLE IF NOT EXISTS feishu_sessions (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  feishu_user_id INTEGER NOT NULL,
+  chat_id        TEXT NOT NULL,
+  chat_type      TEXT,
+  session_id     TEXT,
+  model_id       TEXT,
+  created_at     REAL,
+  updated_at     REAL,
+  UNIQUE(feishu_user_id, chat_id)
+);
+
 -- 模型用量
 CREATE TABLE IF NOT EXISTS model_usage (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,

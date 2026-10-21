@@ -67,6 +67,33 @@ $("#logout").addEventListener("click", async () => {
   showLogin();
 });
 
+/* ---------------------------------------------------------- 修改密码 */
+$("#btn-chpwd").addEventListener("click", () => {
+  openModal(`<h3>修改密码</h3>
+    <p class="muted">新密码至少 8 位。修改后当前会话仍然有效。</p>
+    <div style="display:flex;flex-direction:column;gap:8px;margin-top:10px">
+      <label>原密码<input id="cp-old" type="password" autocomplete="current-password"></label>
+      <label>新密码<input id="cp-new" type="password" autocomplete="new-password"></label>
+      <label>确认新密码<input id="cp-new2" type="password" autocomplete="new-password"></label>
+    </div>
+    <div id="cp-err" class="err"></div>
+    <button class="primary" onclick="doChangePwd()">确认修改</button>`);
+});
+window.doChangePwd = async () => {
+  const err = $("#cp-err");
+  err.textContent = "";
+  const o = $("#cp-old").value, n = $("#cp-new").value, n2 = $("#cp-new2").value;
+  if (!o || !n) { err.textContent = "请填写原密码与新密码"; return; }
+  if (n !== n2) { err.textContent = "两次输入的新密码不一致"; return; }
+  if (n.length < 8) { err.textContent = "新密码至少 8 位"; return; }
+  try {
+    await api("/api/v1/auth/change-password", { method: "POST",
+      body: { old_password: o, new_password: n } });
+    closeModal();
+    toast("密码已修改，下次登录请用新密码");
+  } catch (e) { err.textContent = e.message; }
+};
+
 /* ---------------------------------------------------------- 路由 */
 function route() {
   const h = (location.hash || "#/board").replace("#/", "");
@@ -329,13 +356,17 @@ async function adminUsers(body) {
       <label>子目录<input id="ns-sub" class="inline" placeholder="留空=整共享"></label>
       <button onclick="addScope()">为所选用户授权目录</button>
     </div>
-    <table><thead><tr><th>ID</th><th>用户名</th><th>显示名</th><th>角色</th><th>可见范围</th><th>操作</th></tr></thead><tbody>
+    <table><thead><tr><th>ID</th><th>用户名</th><th>显示名</th><th>角色</th><th>可见范围</th><th>状态</th><th>操作</th></tr></thead><tbody>
     ${r.users.map(u => `<tr>
       <td>${u.id}</td><td>${esc(u.username)}</td><td>${esc(u.display_name || "")}</td>
       <td>${esc(u.role)}</td>
-      <td>${(u.scopes || []).map(s => `<span class="scope-chip">${esc(s)}</span>`).join("") || '<span class="muted">（全部）</span>'}</td>
+      <td>${(u.scopes || []).map(s => `<span class="scope-chip">${esc(s)}</span>`).join("") ||
+            (u.role === "admin" ? '<span class="muted">（全部）</span>'
+                                 : '<span class="muted">（未授权）</span>')}</td>
+      <td>${u.active ? '<span class="muted">启用</span>' : '<span class="err">已停用</span>'}</td>
       <td><button class="sm" onclick="grantUser(${u.id})">授权</button>
-         <button class="sm" onclick="issueTokenFor(${u.id},'${esc(u.username)}')">签发密钥</button></td></tr>`).join("")}
+         <button class="sm" onclick="issueTokenFor(${u.id},'${esc(u.username)}')">签发密钥</button>
+         <button class="sm" onclick="toggleActive(${u.id},${u.active ? 0 : 1})">${u.active ? "停用" : "启用"}</button></td></tr>`).join("")}
     </tbody></table>`;
 }
 window.createUser = async () => {
@@ -345,6 +376,12 @@ window.createUser = async () => {
       role: $("#nu-role").value, display_name: $("#nu-disp").value.trim(), scopes: [] } });
     toast("用户已创建"); loadAdmin();
   } catch (e) { toast("创建失败: " + e.message); }
+};
+window.toggleActive = async (id, active) => {
+  try {
+    await api(`/api/v1/admin/users/${id}/active`, { method: "PUT", body: { active: !!active } });
+    toast(active ? "已启用" : "已停用"); loadAdmin();
+  } catch (e) { toast("操作失败: " + e.message); }
 };
 window.grantUser = (id) => {
   openModal(`<h3>授权可见目录（用户 #${id}）</h3>
@@ -429,16 +466,24 @@ window.delModel = async (id) => {
 
 async function adminTokens(body) {
   const r = await api("/api/v1/admin/tokens");
-  body.innerHTML = `<table><thead><tr><th>ID</th><th>用户</th><th>前缀</th><th>备注</th><th>状态</th><th>创建</th><th>最后使用</th><th>过期</th><th></th></tr></thead><tbody>
+  body.innerHTML = `<table><thead><tr><th>ID</th><th>用户</th><th>前缀</th><th>备注</th><th>状态</th><th>创建</th><th>最后使用</th><th>过期</th><th>操作</th></tr></thead><tbody>
     ${r.tokens.map(t => `<tr><td>${t.id}</td><td>${esc(t.username)}</td><td><code>${esc(t.prefix)}</code></td>
       <td>${esc(t.label || "")}</td><td><span class="badge ${t.revoked ? "failed" : "done"}">${t.revoked ? "已吊销" : "有效"}</span></td>
       <td class="muted">${fmtTime(t.created_at)}</td><td class="muted">${fmtTime(t.last_used_at)}</td>
       <td class="muted">${fmtTime(t.expires_at)}</td>
-      <td>${t.revoked ? "" : `<button class="sm" onclick="revokeToken(${t.id})">吊销</button>`}</td></tr>`).join("")}
-    </tbody></table>`;
+      <td>${t.revoked
+          ? `<button class="sm" onclick="purgeToken(${t.id})">删除</button>`
+          : `<button class="sm" onclick="revokeToken(${t.id})">吊销</button>`}</td></tr>`).join("")}
+    </tbody></table>
+    <p class="muted">吊销后密钥立即失效但记录保留；再点「删除」才会从库中彻底移除（已吊销的才可删）。</p>`;
 }
 window.revokeToken = async (id) => {
   try { await api("/api/v1/admin/tokens/" + id, { method: "DELETE" }); toast("已吊销"); loadAdmin(); }
+  catch (e) { toast("失败: " + e.message); }
+};
+window.purgeToken = async (id) => {
+  if (!confirm("彻底删除这条密钥记录？删除后不可恢复。")) return;
+  try { await api("/api/v1/admin/tokens/" + id + "/purge", { method: "DELETE" }); toast("已删除"); loadAdmin(); }
   catch (e) { toast("失败: " + e.message); }
 };
 

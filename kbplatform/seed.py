@@ -4,6 +4,8 @@
 """
 from __future__ import annotations
 
+import os
+import secrets
 import sys
 
 from kbplatform import auth, models as models_mod
@@ -23,8 +25,12 @@ DEFAULT_RESTRICTED = [
     ("人力资源共享空间", "", "人力资源共享空间（整共享）"),
 ]
 
-ADMIN_USER = "admin"
-ADMIN_PASSWORD = "admin12345"
+# 管理员账号。密码**不再有可预测的默认值**：
+#   * 设了 KB_ADMIN_PASSWORD 就用它
+#   * 没设就首次运行时随机生成，只打印这一次（之后库里只有哈希）
+# 避免每次部署都带着同一个弱口令。
+ADMIN_USER = os.environ.get("KB_ADMIN_USER", "admin")
+ADMIN_PASSWORD = os.environ.get("KB_ADMIN_PASSWORD") or secrets.token_urlsafe(12)
 
 
 def seed(db_path: str = "D:/opencode/kb/data/kb.db",
@@ -58,6 +64,10 @@ def seed(db_path: str = "D:/opencode/kb/data/kb.db",
             out["admin_created"] = True
             out["admin_id"] = uid
             out["admin_password"] = ADMIN_PASSWORD
+            out["admin_password_notice"] = (
+                "这是管理员初始密码，只显示这一次，请立即登录后修改。"
+                if not os.environ.get("KB_ADMIN_PASSWORD")
+                else "管理员初始密码已按 KB_ADMIN_PASSWORD 设置，请登录后修改。")
         else:
             out["admin_created"] = False
             out["admin_id"] = u["id"]

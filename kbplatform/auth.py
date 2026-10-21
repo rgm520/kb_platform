@@ -131,3 +131,34 @@ def set_scopes(conn: sqlite3.Connection, user_id: int, scopes: list[tuple[str, s
         conn.execute("INSERT OR IGNORE INTO user_scopes(user_id, share, subpath) VALUES (?,?,?)",
                      (user_id, share, (subpath or "").strip("\\")))
     conn.commit()
+
+
+MIN_PASSWORD_LEN = 8
+
+
+def change_password(conn: sqlite3.Connection, user_id: int, old_password: str,
+                    new_password: str) -> tuple[bool, str]:
+    """改密码。必须校验旧密码。
+
+    返回 (是否成功, 错误信息)。
+    """
+    u = get_user_by_id(conn, user_id)
+    if u is None:
+        return False, "用户不存在"
+    if not verify_password(u["password_hash"], old_password):
+        return False, "原密码不正确"
+    if not new_password or len(new_password) < MIN_PASSWORD_LEN:
+        return False, f"新密码至少 {MIN_PASSWORD_LEN} 位"
+    if new_password == old_password:
+        return False, "新密码不能与原密码相同"
+    conn.execute("UPDATE users SET password_hash=? WHERE id=?",
+                 (hash_password(new_password), user_id))
+    conn.commit()
+    return True, ""
+
+
+def set_password(conn: sqlite3.Connection, user_id: int, new_password: str) -> None:
+    """管理员直接重置密码（不校验旧密码）。"""
+    conn.execute("UPDATE users SET password_hash=? WHERE id=?",
+                 (hash_password(new_password), user_id))
+    conn.commit()

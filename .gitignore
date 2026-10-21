@@ -8,3 +8,7 @@ _probe/
 *.db-wal
 *.db-shm
 vectors/
+
+# 飞书机器人的凭据与运行产物
+secrets.toml
+.feishu/
