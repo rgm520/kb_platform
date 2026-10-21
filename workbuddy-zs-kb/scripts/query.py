@@ -16,6 +16,13 @@ import sys
 import urllib.error
 import urllib.request
 
+# 中文 Windows 默认输出编码是 GBK，调用方（WorkBuddy / 管道）多半按 UTF-8 解析，
+# 会直接抛 UnicodeDecodeError。这里强制 UTF-8 输出。
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 
 def call(base: str, token: str, path: str, body=None, timeout: int = 300):
     url = base.rstrip("/") + path

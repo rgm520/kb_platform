@@ -14,6 +14,12 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+# 强制 UTF-8 输出：中文 Windows 默认 GBK，调用方按 UTF-8 解析会崩
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 
 def call(base: str, token: str, path: str, body=None, timeout: int = 180):
     url = base.rstrip("/") + path
