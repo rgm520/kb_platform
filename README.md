@@ -123,6 +123,24 @@ $env:ZB_KB_TOKEN   = "kb_管理员签发的密钥"
 - 管理员不受范围限制
 - 每次调用记审计
 
+## 转换器（老格式 / OCR）
+
+| 能力 | 状态 | 实测 |
+|---|---|---|
+| LibreOffice（.doc/.ppt/.xls → 现代格式） | ✅ 可用 | 真实 .doc 3.6MB → 11.7s → 解析出 685 块 / 38,707 字 / 32 表 |
+| PaddleOCR（扫描件 PDF → 文本） | ✅ 可用 | **约 136s/页**（100dpi，CPU） |
+
+OCR 的两个实测结论：
+
+1. **必须禁用 oneDNN**（`FLAGS_use_mkldnn=0` + `enable_mkldnn=False`）。本机 CPU 上
+   oneDNN 路径会抛 `NotImplementedError: ConvertPirAttribute2RuntimeAttribute not support`。
+2. **100 DPI 与 150 DPI 识别质量相同**（248 行 vs 246 行）但快 21%，故默认 100。
+   可用环境变量 `KB_OCR_DPI` 调整。
+
+> ⚠️ **CPU OCR 不适合批量处理存量**：5.8 万份扫描件（按 3 页算）约需 **275 天**连续运行。
+> 要处理存量需要 GPU 版 paddlepaddle-gpu（本机 RTX 3060 可跑）或云 OCR（但涉密内容不可出内网）。
+> 当前策略与决策一致——**只处理监控范围内新进来的文件**，存量暂不识别。
+
 ## 关键约束（改动前务必读 `kb/README.md`）
 
 1. 生成模型必须用 `qwen3.5-9b-32k` / `qwen3.5-9b-64k`，**不得**用默认的 `qwen3.5:9b`（4096 上下文会静默截断）
