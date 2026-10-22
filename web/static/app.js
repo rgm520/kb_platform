@@ -7,6 +7,7 @@ const state = {
   docs: { page: 1, size: 50, total: 0 },
   filters: { status: "", share: "" },
   cy: null, models: [], adminTab: "users",
+  tokenUserFilter: null, tokenLabel: "", tokenCounts: {},
 };
 
 function toast(msg, ms) {
@@ -342,7 +343,13 @@ async function loadAdmin() {
 }
 
 async function adminUsers(body) {
-  const r = await api("/api/v1/admin/users");
+  const [r, tok] = await Promise.all([
+    api("/api/v1/admin/users"),
+    api("/api/v1/admin/tokens"),
+  ]);
+  const cnt = {};
+  for (const t of tok.tokens) cnt[t.user_id] = (cnt[t.user_id] || 0) + 1;
+  state.tokenCounts = cnt;
   body.innerHTML = `
     <div class="form-row">
       <label>用户名<input id="nu-name" class="inline"></label>
@@ -365,7 +372,7 @@ async function adminUsers(body) {
                                  : '<span class="muted">（未授权）</span>')}</td>
       <td>${u.active ? '<span class="muted">启用</span>' : '<span class="err">已停用</span>'}</td>
       <td><button class="sm" onclick="grantUser(${u.id})">授权</button>
-         <button class="sm" onclick="issueTokenFor(${u.id},'${esc(u.username)}')">签发密钥</button>
+         <button class="sm" onclick="filterTokensOf(${u.id})">密钥 ${tokenCount(u.id)}</button>
          <button class="sm" onclick="toggleActive(${u.id},${u.active ? 0 : 1})">${u.active ? "停用" : "启用"}</button></td></tr>`).join("")}
     </tbody></table>`;
 }
@@ -399,13 +406,16 @@ window.saveScopes = async (id) => {
   } catch (e) { toast("保存失败: " + e.message); }
 };
 window.issueTokenFor = async (uid, name) => {
-  try {
-    const r = await api(`/api/v1/admin/tokens?user_id=${uid}`, { method: "POST", body: { label: "workbuddy", ttl_days: 90 } });
-    openModal(`<h3>密钥已签发</h3><p class="muted">用户 ${esc(name)}。这是唯一一次显示明文，请立即交给用户。</p>
-      <div style="background:#1c232c;padding:12px;border-radius:6px;font-family:monospace;word-break:break-all">${esc(r.token)}</div>`);
-    loadAdmin();
-  } catch (e) { toast("签发失败: " + e.message); }
+  // 兼容旧入口：统一走 API 密钥页的签发表单
+  state.tokenUserFilter = uid;
+  state.adminTab = "tokens";
+  $$(".tabs button").forEach(x => x.classList.toggle("active", x.dataset.t === "tokens"));
+  await loadAdmin();
+  const sel = $("#tk-user");
+  if (sel) sel.value = String(uid);
+  toast("已切到 API 密钥页，请确认备注与有效期后签发");
 };
+window.tokenCount = (uid) => (state.tokenCounts && state.tokenCounts[uid]) || 0;
 
 async function adminRestricted(body) {
   const r = await api("/api/v1/admin/restricted");
@@ -464,19 +474,68 @@ window.delModel = async (id) => {
   catch (e) { toast("失败: " + e.message); }
 };
 
+/* ---------------------------------------------------------- API 密钥
+   密钥只有一处签发入口（就在本��签），用户列表里只显示数量并可跳转过来。
+   生命周期：签发 -> 吊销 -> 删除。 */
+
 async function adminTokens(body) {
-  const r = await api("/api/v1/admin/tokens");
-  body.innerHTML = `<table><thead><tr><th>ID</th><th>用户</th><th>前缀</th><th>备注</th><th>状态</th><th>创建</th><th>最后使用</th><th>过期</th><th>操作</th></tr></thead><tbody>
-    ${r.tokens.map(t => `<tr><td>${t.id}</td><td>${esc(t.username)}</td><td><code>${esc(t.prefix)}</code></td>
+  const [tok, usr] = await Promise.all([
+    api("/api/v1/admin/tokens"),
+    api("/api/v1/admin/users"),
+  ]);
+  const byUser = {};
+  for (const t of tok.tokens) {
+    (byUser[t.user_id] = byUser[t.user_id] || []).push(t);
+  }
+  const cur = state.tokenUserFilter;
+  const shown = cur ? tok.tokens.filter(t => t.user_id === cur) : tok.tokens;
+  const uname = id => (usr.users.find(u => u.id === id) || {}).username || ("#" + id);
+
+  body.innerHTML = `
+    <div class="form-row">
+      <label>用户<select id="tk-user">${usr.users.map(u =>
+        `<option value="${u.id}"${cur === u.id ? " selected" : ""}>${esc(u.display_name || u.username)} (${esc(u.username)})</option>`).join("")}</select></label>
+      <label>备注<input id="tk-label" class="inline" placeholder="如：WorkBuddy 接入 / 自动化脚本" value="${esc(state.tokenLabel || "")}"></label>
+      <label>有效期(天)<input id="tk-ttl" class="inline" type="number" value="90" min="1"></label>
+      <button class="primary" onclick="issueToken()">签发密钥</button>
+      ${cur ? '<button onclick="clearTokenFilter()">显示全部用户</button>' : ""}
+    </div>
+    <div class="muted" style="margin-bottom:8px">明文只显示一次，请立即交给用户。用户与其密钥是 1:N 关系——同一用户可签发多枚（如不同机器各一枚）。</div>
+    <table><thead><tr><th>ID</th><th>用户</th><th>前缀</th><th>备注</th><th>状态</th><th>创建</th><th>最后使用</th><th>过期</th><th>操作</th></tr></thead><tbody>
+    ${shown.length ? shown.map(t => `<tr><td>${t.id}</td><td>${esc(uname(t.user_id))}</td><td><code>${esc(t.prefix)}</code></td>
       <td>${esc(t.label || "")}</td><td><span class="badge ${t.revoked ? "failed" : "done"}">${t.revoked ? "已吊销" : "有效"}</span></td>
       <td class="muted">${fmtTime(t.created_at)}</td><td class="muted">${fmtTime(t.last_used_at)}</td>
       <td class="muted">${fmtTime(t.expires_at)}</td>
       <td>${t.revoked
           ? `<button class="sm" onclick="purgeToken(${t.id})">删除</button>`
-          : `<button class="sm" onclick="revokeToken(${t.id})">吊销</button>`}</td></tr>`).join("")}
+          : `<button class="sm" onclick="revokeToken(${t.id})">吊销</button>`}</td></tr>`).join("")
+      : '<tr><td colspan="9" class="muted">没有密钥</td></tr>'}
     </tbody></table>
     <p class="muted">吊销后密钥立即失效但记录保留；再点「删除」才会从库中彻底移除（已吊销的才可删）。</p>`;
 }
+window.issueToken = async () => {
+  const uid = Number($("#tk-user").value);
+  const label = $("#tk-label").value.trim();
+  const ttl = Number($("#tk-ttl").value) || 90;
+  try {
+    const r = await api(`/api/v1/admin/tokens?user_id=${uid}`, { method: "POST",
+      body: { label: label || null, ttl_days: ttl } });
+    openModal(`<h3>密钥已签发</h3>
+      <p class="muted">用户 ${esc($("#tk-user").selectedOptions[0].textContent)}。这是唯一一次显示明文，请立即交给用户。</p>
+      <div style="background:#1c232c;padding:12px;border-radius:6px;font-family:monospace;word-break:break-all">${esc(r.token)}</div>
+      <p class="muted" style="margin-top:10px">交给用户后，让他们配置到 WorkBuddy：
+      环境变量 <code>ZB_KB_TOKEN</code>。</p>`);
+    state.tokenLabel = "";
+    loadAdmin();
+  } catch (e) { toast("签发失败: " + e.message); }
+};
+window.filterTokensOf = (uid) => {
+  state.tokenUserFilter = uid;
+  state.adminTab = "tokens";
+  $$(".tabs button").forEach(x => x.classList.toggle("active", x.dataset.t === "tokens"));
+  loadAdmin();
+};
+window.clearTokenFilter = () => { state.tokenUserFilter = null; loadAdmin(); };
 window.revokeToken = async (id) => {
   try { await api("/api/v1/admin/tokens/" + id, { method: "DELETE" }); toast("已吊销"); loadAdmin(); }
   catch (e) { toast("失败: " + e.message); }

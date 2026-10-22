@@ -640,7 +640,20 @@ def make_app(config_path: str = "D:/opencode/config.toml") -> FastAPI:
 
     # ============================================================ 静态页面
     if os.path.isdir(WEB_DIR):
-        app.mount("/static", StaticFiles(directory=os.path.join(WEB_DIR, "static")),
+        class NoCacheStatic(StaticFiles):
+            """静态资源禁用强缓存。
+
+            内部工具更新频繁，若让浏览器缓存 app.js，用户会在更新后继续跑
+            旧代码（表现为"改了没生效"、"功能对不上"）。
+            这里用 no-cache + 每次回源校验（304），保证改动即时生效。
+            """
+            def file_response(self, *args, **kwargs):
+                resp = super().file_response(*args, **kwargs)
+                resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+                resp.headers["Pragma"] = "no-cache"
+                return resp
+
+        app.mount("/static", NoCacheStatic(directory=os.path.join(WEB_DIR, "static")),
                   name="static")
 
         @app.get("/")
