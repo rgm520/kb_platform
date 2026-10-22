@@ -1,77 +1,87 @@
-﻿# 看门狗：每分钟检查一次平台是否健康，异常则通过计划任务重新拉起
+﻿# 看门狗：监督进程不在了就重新拉起平台
 #
-# 为什么不用 Task Scheduler 的「失败后重启」：
-#   实测强杀任务进程后，LastTaskResult=0xFFFFFFFF 但任务直接转 Ready，
-#   **不会**按 RestartCount 重新启动（外部终止不算「失败」）。
-#   周期看门狗是 Windows 上更可靠的做法。
+# 职责边界（重要）：
+#   **Web 服务是否健康由监督进程自己管**（它有独立的健康检查与重启逻辑）。
+#   看门狗只负责一件事：**监督进程本身不在了**，把平台重新拉起来。
+#   早期版本看门狗还管健康检查，结果它自己 8 秒超时判失败就把
+#   健康的服务杀了重启——用户看到的就是"服务异常"。教训：看门狗要保守。
 #
-# 检查三件事，任一不满足就重启：
-#   1. 监督进程存在
-#   2. 心跳文件新鲜（< 90 秒）
-#   3. /health 返回 200
+# 保守策略：
+#   * 连续 2 次检测不到监督进程才动手（避开任务启动瞬间的竞态）
+#   * 刚重启过 120 秒内不再动（避免反复重启）
+#   * 清理时只杀平台自己的进程（按命令行特征），不碰飞书机器人等其它服务
 #
-# 重新拉起的方式是 Start-ScheduledTask（而不是自己拉进程），
-# 这样新进程仍然归 Task Scheduler 托管，不会被看门狗自己的 shell 连坐杀掉。
+# 用法：powershell -NoProfile -ExecutionPolicy Bypass -File D:\opencode\tools\watchdog.ps1
 
 $root = "D:\opencode"
 $TaskName = "OpenCode-KB-Platform"
-$hb = "$root\kb\logs\supervisor-heartbeat.json"
 $log = "$root\kb\logs\watchdog.log"
+$stateFile = "$root\kb\logs\watchdog-state.json"
 
 function Log($msg) {
   $line = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] $msg"
   Add-Content -Path $log -Value $line -Encoding UTF8
 }
 
-try {
-  # 1) 监督进程
-  $sup = @(Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='pythonw.exe'" |
-           Where-Object { $_.CommandLine -and $_.CommandLine.Contains("kbplatform.supervisor") })
-
-  # 2) 心跳新鲜度
-  $hbFresh = $false
-  if (Test-Path $hb) {
-    try {
-      $j = Get-Content $hb -Raw -Encoding UTF8 | ConvertFrom-Json
-      # 注意：FromUnixTimeSeconds 是 [DateTimeOffset] 的**静态**方法，
-      # 在 [DateTime] 实例上调用会抛 "方法调用失败"，
-      # 若被 catch 吞掉就会让心跳永远判定为不新鲜，导致每分钟误重启。
-      $parsed = [DateTimeOffset]::FromUnixTimeSeconds([int64]$j.ts).LocalDateTime
-      $age = (Get-Date) - $parsed
-      $hbFresh = ($age.TotalSeconds -lt 90)
-    } catch {
-      Log "心跳解析失败（将按不健康处理）: $($_.Exception.Message)"
-      $hbFresh = $false
-    }
-  }
-
-  # 3) 健康检查
-  $healthy = $false
-  try {
-    $r = Invoke-WebRequest -Uri "http://127.0.0.1:8000/health" -UseBasicParsing -TimeoutSec 8
-    $healthy = ($r.StatusCode -eq 200)
-  } catch { $healthy = $false }
-
-  if ($sup.Count -gt 0 -and $hbFresh -and $healthy) {
-    exit 0
-  }
-
-  Log "异常: 监督进程=$($sup.Count) 心跳新鲜=$hbFresh 健康=$healthy -> 重启"
-
-  # 停掉任务（连带其子进程）与**所有**平台进程
-  # ——包括孤儿监督进程：看门狗重启时若只清 web/ingest 不清孤儿监督进程，
-  #   会出现两个监督进程并存，后者因端口被占用而反复崩溃。
-  Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-  Start-Sleep -Seconds 2
+function Get-PlatformProcs {
   Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='pythonw.exe'" |
     Where-Object { $_.CommandLine -and
       ($_.CommandLine.Contains("kbplatform.supervisor") -or
        $_.CommandLine.Contains("kbplatform.service:app") -or
-       $_.CommandLine.Contains("kbplatform.pipeline")) } |
-    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-  Start-Sleep -Seconds 3
+       $_.CommandLine.Contains("kbplatform.pipeline")) }
+}
+
+try {
+  $sup = @(Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='pythonw.exe'" |
+           Where-Object { $_.CommandLine -and $_.CommandLine.Contains("kbplatform.supervisor") })
+
+  # 状态：连续几次没看到监督进程 / 上次重启时间
+  $st = @{ misses = 0; lastRestart = 0.0 }
+  if (Test-Path $stateFile) {
+    try { $st = Get-Content $stateFile -Raw -Encoding UTF8 | ConvertFrom-Json } catch { }
+  }
+  $st.misses = [int]$st.misses
+  $st.lastRestart = [double]$st.lastRestart
+
+  if ($sup.Count -gt 0) {
+    if ($st.misses -ne 0) { Log "监督进程已恢复，���清零连续缺失计数" }
+    $st.misses = 0
+    $st | ConvertTo-Json | Set-Content -Path $stateFile -Encoding UTF8
+    exit 0
+  }
+
+  $st.misses = $st.misses + 1
+  $st | ConvertTo-Json | Set-Content -Path $stateFile -Encoding UTF8
+
+  if ($st.misses -lt 2) {
+    Log "未发现监督进程（第 $($st.misses) 次，暂不动作）"
+    exit 0
+  }
+
+  $since = (Get-Date).AddSeconds(-120)
+  if ($st.lastRestart -gt 0) {
+    $last = (Get-Date).FromUnixTimeSeconds([int]$st.lastRestart)
+    if ($last -gt $since) {
+      Log "刚在 $([int]((Get-Date) - $last).TotalSeconds) 秒前重启过，跳过"
+      $st.misses = 0
+      $st | ConvertTo-Json | Set-Content -Path $stateFile -Encoding UTF8
+      exit 0
+    }
+  }
+
+  Log "连续 $($st.misses) 次未发现监督进程 -> 重新拉起平台"
+
+  Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+  Start-Sleep -Seconds 2
+  foreach ($p in @(Get-PlatformProcs)) {
+    Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+  }
+  Start-Sleep -Seconds 2
 
   Start-ScheduledTask -TaskName $TaskName
+  $st.misses = 0
+  $st.lastRestart = [int][double]::Parse((Get-Date -UFormat %s))
+  $st | ConvertTo-Json | Set-Content -Path $stateFile -Encoding UTF8
   Log "已通过计划任务重新拉起 $TaskName"
 } catch {
   Log "看门狗自身异常: $($_.Exception.Message)"

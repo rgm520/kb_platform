@@ -31,9 +31,11 @@ if ($existing) {
 }
 
 $py = "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe"
-# -Argument 只接受**单个字符串**，不能传数组
-$action = New-ScheduledTaskAction -Execute $py `
-  -Argument "-m kbplatform.supervisor `"$root\config.toml`"" `
+# 走 run-supervisor.ps1 包装：它把 stdout/stderr 重定向进日志文件。
+# 直接跑 python 的话，计划任务会把输出丢进 Task Scheduler 自己的捕获区，
+# **出问题时什么都看不到**（踩过：监督进程死在哪完全无从查起）。
+$action = New-ScheduledTaskAction -Execute "powershell.exe" `
+  -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$root\tools\run-supervisor.ps1`"" `
   -WorkingDirectory $root
 
 # 登录时启动（需要用户会话才能拿到盘符映射）
