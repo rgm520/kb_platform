@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 import time
 
 from kbplatform.paths import to_unc
@@ -89,7 +90,10 @@ CREATE TABLE IF NOT EXISTS api_tokens (
   revoked      INTEGER DEFAULT 0,
   created_at   REAL,
   last_used_at REAL,
-  expires_at   REAL
+  expires_at   REAL,
+  -- AES-GCM 密文（可恢复明文），密钥由 session_secret 派生。
+  -- 见 kbplatform/auth.py 模块 docstring。
+  token_enc    TEXT
 );
 
 -- 注册到用户名下的外部智能体
@@ -204,13 +208,62 @@ def connect(db_path: str) -> sqlite3.Connection:
     os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
     # check_same_thread=False：FastAPI 的同步端点跑在 anyio 线程池里，
     # 连接在主线程创建会导致 "SQLite objects created in a thread can only
-    # be used in that same thread"。CPython 的 sqlite3 在 Windows 上是
-    # SERIALIZED 模式，多线程共用一个连接是安全的。
+    # be used in that same thread"。
     conn = sqlite3.connect(db_path, timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=15000")
+    # WAL：读写不互相阻塞。平台是"读多写少"，而摄入流水线一直在写，
+    # 默认的 rollback journal 会让 API 请求排队等写锁。
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.OperationalError:
+        pass
     return conn
+
+
+class ThreadLocalConn:
+    """按线程复用的 sqlite 连接代理（接口与 sqlite3.Connection 兼容）。
+
+    为什么不能让所有请求线程共用一个连接：
+        一个 sqlite3 连接内部只有**一份**语句状态。线程 A 正在
+        `cursor.fetchone()`，线程 B 此时调 `conn.commit()` 或执行下一条 SQL，
+        A 的游标会被重置，fetchone() 返回 None —— 对外表现为随机的
+        `TypeError: 'NoneType' object is not subscriptable`（踩过两次）。
+
+        CPython 的 sqlite3 在 Windows 上虽然是 SERIALIZED 模式（库级互斥），
+        但那只保护"调用 sqlite 库"这一步，不保护**每条语句的游标状态**——
+        所以共享连接并不安全。
+
+    用法：调用方照旧 `conn.execute(...)` / `conn.commit()`，无感知。
+    """
+
+    def __init__(self, db_path: str):
+        self._db_path = db_path
+        self._local = threading.local()
+
+    def _conn(self) -> sqlite3.Connection:
+        c = getattr(self._local, "conn", None)
+        if c is None:
+            c = connect(self._db_path)
+            self._local.conn = c
+        return c
+
+    def execute(self, *args, **kwargs):
+        return self._conn().execute(*args, **kwargs)
+
+    def commit(self):
+        self._conn().commit()
+
+    def close(self):
+        c = getattr(self._local, "conn", None)
+        if c is not None:
+            c.close()
+            self._local.conn = None
+
+    def __getattr__(self, name):
+        # 其余属性（row_factory / in_transaction / ...）转发给当前线程的连接
+        return getattr(self._conn(), name)
 
 
 def _repair_chunk_fk(conn: sqlite3.Connection) -> bool:
@@ -262,7 +315,11 @@ def init_db(db_path: str) -> sqlite3.Connection:
         pass
     # 老库补列
     for ddl in ("ALTER TABLE models ADD COLUMN in_parse_pool INTEGER DEFAULT 0",
-                "ALTER TABLE models ADD COLUMN pool_weight REAL DEFAULT 1"):
+                "ALTER TABLE models ADD COLUMN pool_weight REAL DEFAULT 1",
+                # 密钥的可恢复密文：让管理员能重新查看完整密钥，
+                # 避免"密钥只能显示一次 -> 丢失就必须换密钥 -> 正在用旧密钥的
+                # 智能体全部 401" 这个死循环。
+                "ALTER TABLE api_tokens ADD COLUMN token_enc TEXT"):
         try:
             conn.execute(ddl)
         except sqlite3.OperationalError:

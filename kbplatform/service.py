@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 
 from kbplatform import auth, models as models_mod
 from kbplatform.config import Config, load_config
-from kbplatform.db import init_db
+from kbplatform.db import init_db, ThreadLocalConn
 from kbplatform.retrieval import Retriever
 from kbplatform.scopes import (load_restricted, load_scopes, describe_scopes,
                                is_restricted)
@@ -36,6 +36,32 @@ SESSION_COOKIE = "kb_session"
 SESSION_TTL = 8 * 3600
 RATE_QPS = 5
 RATE_DAILY = 500
+
+# 密钥失效时给出的提示语。写成**可执行**的指令，让 AI 读了就知道下一步做什么，
+# 而不是只丢一句"无效"让调用方反复重试。
+_AUTH_FAIL_HINT = {
+    "prefix": ("你发来的是密钥前缀（前 12 位），不是密钥本身。"
+               "完整密钥约 35 位，形如 kb_xxxxxxxxxxxxxxxxxxxxxxxxxxxxx。"
+               "请让知识库管理员把完整密钥发给你，不要用前缀重试。"),
+    "revoked": ("该密钥已被管理员吊销，不能再使用。"
+                "请让管理员重新签发一枚，并把完整密钥（约 35 位）发给你。"),
+    "expired": ("该密钥已过期，不能再使用。"
+                "请让管理员重新签发一枚，并把完整密钥（约 35 位）发给你。"),
+    "unknown": ("密钥无效：平台里没有这枚密钥。"
+                "请确认拿到的是**完整密钥**（约 35 位）而不是列表里显示的前缀（前 12 位）；"
+                "若确认无误，请让管理员重新签发一枚。"),
+}
+
+
+def _client_ip(request: Request) -> str | None:
+    """取客户端 IP。反代后面看 X-Forwarded-For，没有就取直连地址。"""
+    try:
+        fwd = request.headers.get("x-forwarded-for")
+        if fwd:
+            return fwd.split(",")[0].strip()
+        return request.client.host if request.client else None
+    except Exception:
+        return None
 
 
 # ------------------------------------------------------------ 请求体
@@ -114,10 +140,17 @@ class ChangePwdReq(BaseModel):
 
 def make_app(config_path: str = "D:/opencode/config.toml") -> FastAPI:
     cfg = load_config(config_path)
-    conn = init_db(cfg.db_path)
+    init_db(cfg.db_path)                      # 建表 + 补列（幂等）
+    # 请求线程各自持有一条连接：共享一条连接时，别的线程 commit 会把
+    # 本线程尚未 fetch 的游标重置，表现为随机的 "NoneType is not subscriptable"。
+    conn = ThreadLocalConn(cfg.db_path)
     vs = VectorStore(cfg.vector_dir, dim=cfg.embed_dim)
     retriever = Retriever(conn, cfg.fts_path, vs, embed_model=cfg.embed_model)
     secret = os.environ.get("KB_SESSION_SECRET") or secrets.token_hex(32)
+
+    # 密钥密文的加解密主密钥。用 config.toml 的 session_secret 派生，
+    # 这样重启服务后仍能解开历史密钥（管理员可以重新查看完整密钥）。
+    auth.set_encryption_key(cfg.session_secret or secret, cfg.token_recoverable)
 
     app = FastAPI(title="企业知识平台", version="1.0")
     app.state.cfg = cfg
@@ -168,14 +201,31 @@ def make_app(config_path: str = "D:/opencode/config.toml") -> FastAPI:
             raise HTTPException(403, detail="需要管理员权限")
         return u
 
-    def token_user(authorization: Optional[str] = Header(None)) -> dict:
-        """对外 API 鉴权：Bearer token。"""
+    def token_user(request: Request,
+                   authorization: Optional[str] = Header(None)) -> dict:
+        """对外 API 鉴权：Bearer token。
+
+        失败时做三件事：
+          1. 判定失败原因（前缀 / 已吊销 / 已过期 / 不存在）
+          2. 落一条审计（action='auth_failed'），记下客户端 IP 与 User-Agent，
+             这样"谁的客户端还在用旧密钥"是**看得见**的，而不是只能靠猜
+          3. 401 的 detail 写成**可执行**的提示，AI 读了就知道该干什么
+        """
         if not authorization or not authorization.lower().startswith("bearer "):
             raise HTTPException(401, detail="缺少 Authorization: Bearer <token>")
         raw = authorization.split(None, 1)[1].strip()
         row = auth.resolve_token(conn, raw)
         if row is None:
-            raise HTTPException(401, detail="token 无效、已吊销或已过期")
+            reason = auth.diagnose_token(conn, raw)
+            detail = _AUTH_FAIL_HINT.get(reason, _AUTH_FAIL_HINT["unknown"])
+            try:
+                audit(None, raw[:12] or "(空)", "auth_failed",
+                      question=f"presented_len={len(raw)} reason={reason}",
+                      hit_paths=None, model_used=None, restricted=False,
+                      ip=_client_ip(request))
+            except Exception:
+                pass
+            raise HTTPException(401, detail=detail)
         u = auth.get_user_by_id(conn, row["user_id"])
         if u is None or not u["active"]:
             raise HTTPException(401, detail="token 对应账号不可用")
@@ -197,13 +247,20 @@ def make_app(config_path: str = "D:/opencode/config.toml") -> FastAPI:
 
         两条通路拿到的都是「某个用户」，后续的 scope 过滤逻辑完全一致。
         """
-        if authorization and authorization.lower().startswith("bearer "):
-            ctx = token_user(authorization)
+        if authorization:
+            if not authorization.lower().startswith("bearer "):
+                raise HTTPException(
+                    401, detail="Authorization 头格式不对，应为 "
+                               "`Authorization: Bearer <token>`（<token> 是约 35 位的完整密钥）")
+            ctx = token_user(request, authorization)
             ctx["via"] = "token"
             return ctx
         u = current_user(request)
         if u is None:
-            raise HTTPException(401, detail="未登录")
+            raise HTTPException(
+                401, detail="未登录：缺少 `Authorization: Bearer <token>` 请求头。"
+                           "API 调用请带完整密钥（约 35 位，不是前 12 位前缀）；"
+                           "浏览器使用请先在平台登录。")
         return {"user": u, "token": None, "token_row": None, "via": "session"}
 
     def scope_user_id(user: dict) -> Optional[int]:
@@ -292,7 +349,9 @@ def make_app(config_path: str = "D:/opencode/config.toml") -> FastAPI:
         return "\n\n".join(parts)
 
     def do_query(req: QueryReq, user_id: int, model_ref: str, token_prefix=None,
-                 ip=None, want_text=False):
+                 ip=None, want_text=False, audit_uid=None):
+        # user_id  = 可见范围过滤用的用户 id（管理员为 None = 不限）
+        # audit_uid= 审计归属用的真实用户 id（管理员也要记上，否则查不到是谁在用）
         hits, stats = retriever.retrieve(req.question, user_id=user_id, topk=req.top_k)
         restricted = any(h.restricted for h in hits)
         requested, local_models = pick_model(conn, model_ref, user_id)
@@ -326,7 +385,8 @@ def make_app(config_path: str = "D:/opencode/config.toml") -> FastAPI:
             citations.append(c)
 
         if token_prefix:
-            audit(user_id, token_prefix, "query", req.question,
+            audit(audit_uid if audit_uid is not None else user_id,
+                  token_prefix, "query", req.question,
                   [h.file_path for h in hits], used.model_id, restricted, ip)
 
         resp = {"answer": text, "citations": citations,
@@ -343,8 +403,9 @@ def make_app(config_path: str = "D:/opencode/config.toml") -> FastAPI:
         tok = ctx["token_row"]
         resp, _, _, _ = do_query(req, scope_user_id(u), req.model,
                                  token_prefix=(tok["prefix"] if tok else None),
-                                 ip=request.client.host if request.client else None,
-                                 want_text=req.include_text)
+                                 ip=_client_ip(request),
+                                 want_text=req.include_text,
+                                 audit_uid=u["id"])
         return resp
 
     @app.post("/api/v1/search")
@@ -680,8 +741,9 @@ def make_app(config_path: str = "D:/opencode/config.toml") -> FastAPI:
             "base_url": base,
             "guide": guide_mod.build_guide(base, tok, labels, deploy),
             "skill_snippet": guide_mod.build_skill_snippet(base + "/api/v1", tok),
-            "note": ("密钥明文只在签发时显示一次，库里只有哈希，无法还原。"
-                     "请从「API 密钥」列表里用你自己的密钥替换占位符。"),
+            "note": ("「API 密钥」页点「查看密钥」可以随时取出完整密钥（约 35 位），"
+                     "把它填进上面的输入框，下载的手册就带着真实密钥，客户端可直接用。"
+                     "注意：列表里显示的前缀（前 12 位）不是密钥，填进去会 401。"),
         }
 
     @app.get("/api/v1/admin/skill-package")
@@ -921,7 +983,9 @@ def make_app(config_path: str = "D:/opencode/config.toml") -> FastAPI:
     def admin_tokens(ctx=Depends(require_admin)):
         rows = conn.execute(
             "SELECT t.id,t.user_id,u.username,t.prefix,t.label,t.revoked,t.created_at,"
-            "t.last_used_at,t.expires_at FROM api_tokens t JOIN users u ON u.id=t.user_id"
+            "t.last_used_at,t.expires_at,"
+            "(t.token_enc IS NOT NULL) AS recoverable FROM api_tokens t "
+            "JOIN users u ON u.id=t.user_id"
             " ORDER BY t.revoked ASC, t.id DESC").fetchall()
         return {"tokens": [dict(r) for r in rows]}
 
@@ -931,6 +995,35 @@ def make_app(config_path: str = "D:/opencode/config.toml") -> FastAPI:
         raw, tid = auth.issue_token(conn, user_id, req.label, req.ttl_days)
         return {"id": tid, "token": raw,
                 "notice": "这是唯一一次显示明文 token，请立即交给用户"}
+
+    @app.get("/api/v1/admin/tokens/{token_id}/plaintext")
+    def admin_token_plaintext(request: Request, token_id: int,
+                              ctx=Depends(require_admin)):
+        """重新查看某枚密钥的**完整明文**。
+
+        密钥除了哈希还存了 AES-GCM 密文（密钥由 session_secret 派生），
+        所以管理员随时能把完整密钥再拿出来，交给新的客户端。
+
+        为什么需要这个：密钥只在签发那一刻显示一次，丢失就只能重新签发，
+        而重新签发会让**所有正在用旧密钥的智能体立刻 401**。
+        能重新查看，就不必换密钥，故障可以在原地修好。
+        """
+        row = conn.execute("SELECT user_id, prefix, revoked FROM api_tokens WHERE id=?",
+                           (token_id,)).fetchone()
+        if row is None:
+            raise HTTPException(404, detail="密钥不存在")
+        plain = auth.token_plaintext(conn, token_id)
+        if not plain:
+            raise HTTPException(
+                404, detail="这枚密钥没有保存可恢复密文（可能是本平台上线前签发的，"
+                            "或配置里关掉了 token_recoverable）。请重新签发一枚。")
+        # 留痕：谁在什么时候调看了密钥明文
+        audit(ctx["id"], row["prefix"], "token_view",
+              question=f"token_id={token_id}", hit_paths=None, model_used=None,
+              restricted=False, ip=_client_ip(request))
+        return {"id": token_id, "token": plain, "prefix": row["prefix"],
+                "revoked": bool(row["revoked"]),
+                "notice": "密钥明文可再次查看——请直接复制给客户端，不要转述前缀。"}
 
     @app.delete("/api/v1/admin/tokens/{token_id}")
     def admin_revoke_token(token_id: int, ctx=Depends(require_admin)):

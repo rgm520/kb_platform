@@ -23,6 +23,10 @@ class Config:
     embed_dim: int = 1024
     session_secret: str = ""
     public_base_url: str = ""
+    # 密钥是否保存可恢复密文（默认 true）。
+    # 开启后管理员能在管理台重新查看完整密钥，密钥弄丢不用换密钥，
+    # 正在使用旧密钥的智能体不会被打断。详见 kbplatform/auth.py。
+    token_recoverable: bool = True
 
     def __post_init__(self):
         if not self.db_path:
@@ -61,4 +65,6 @@ def load_config(path: str) -> Config:
         # 但手册要发给局域网里的 AI 用，所以单独配。
         public_base_url=str(security.get("public_base_url", "")
                             or os.environ.get("KB_PUBLIC_BASE_URL", "")),
+        # 密钥可恢复密文：默认开启，可在 config.toml 用 token_recoverable=false 关掉。
+        token_recoverable=bool(security.get("token_recoverable", True)),
     )
