@@ -760,86 +760,42 @@ window.openApiGuide = async () => {
   try { g = await api("/api/v1/admin/api-guide"); }
   catch (e) { toast("生成失败: " + e.message); return; }
   state.apiGuide = g;
-  openModal(`<h3>对外 API 调用手册</h3>
-    <p class="muted">复制或下载下来，交给 AI 智能体（WorkBuddy 等）即可，它照着就能调用知识库做问答。
-    地址与模型列表从运行配置实时生成，不会过期。</p>
-    <div class="form-row" style="margin:10px 0">
-      <label style="min-width:300px">把你的密钥填在这里（可选，会自动替换占位符）
+  openModal(`<h3>API 接入说明（给 AI 用）</h3>
+    <p class="muted">这是一份写给 AI 智能体的接入说明：怎么用密钥连上平台、怎么查知识、
+    怎么下载文档，每一步都有可直接照抄的调用示例。下载后整份发给 AI 即可。</p>
+    <div class="form-row" style="margin:12px 0">
+      <label style="min-width:300px">把你的密钥填在这里（可选，下载时自动替换占位符）
         <input id="guide-token" type="password" placeholder="kb_xxxx，留空则保留占位符"></label>
     </div>
     <div class="form-row" style="margin:0 0 10px">
-      <button class="primary" onclick="copyGuide('guide-text')">复制完整手册</button>
-      <button onclick="copyGuide('skill-text')">复制 WorkBuddy 片段</button>
-      <button onclick="downloadGuide('guide-text','企业知识库API调用手册.md')">⬇ 下载完整手册 (.md)</button>
-      <button onclick="downloadGuide('skill-text','workbuddy-企业知识库技能片段.md')">⬇ 下载技能片段 (.md)</button>
-      <button onclick="downloadSkillPackage()">⬇ 下载 WorkBuddy 技能包 (.zip)</button>
+      <button class="primary" onclick="downloadGuide()">⬇ 下载完整手册 (.md)</button>
+      <span class="muted">${esc(g.note)}</span>
     </div>
-    <div class="tabs" style="margin:0 0 8px">
-      <button class="active" onclick="switchGuide('full')">完整手册</button>
-      <button onclick="switchGuide('skill')">WorkBuddy 片段</button>
-    </div>
-    <div id="guide-pane">${this._pane(g.guide, "guide-text", 340)}</div>
-    <div id="skill-pane" class="hidden">${this._pane(g.skill_snippet, "skill-text", 260)}</div>
-    <p class="muted" style="margin-top:8px">${esc(g.note)}</p>`);
-  // 密钥输入即时替换占位符
+    <details>
+      <summary class="muted" style="cursor:pointer">预览（不下载也能看）</summary>
+      <textarea id="guide-text" style="width:100%;height:420px;margin-top:8px;background:#1c232c;color:#e6edf3;border:1px solid #2a333d;border-radius:6px;padding:10px;font:12px/1.5 Consolas,monospace">${esc(g.guide)}</textarea>
+    </details>`);
   const ti = $("#guide-token");
-  if (ti) ti.addEventListener("input", () => applyTokenToGuides(ti.value.trim()));
-};
-window._pane = function (text, id, h) {
-  return `<textarea id="${id}" style="width:100%;height:${h}px;background:#1c232c;color:#e6edf3;border:1px solid #2a333d;border-radius:6px;padding:10px;font:12px/1.5 Consolas,monospace">${esc(text)}</textarea>`;
-};
-window.applyTokenToGuides = function (tok) {
-  for (const id of ["guide-text", "skill-text"]) {
-    const el = document.getElementById(id);
-    if (!el) continue;
+  if (ti) ti.addEventListener("input", () => {
+    const el = document.getElementById("guide-text");
+    if (!el) return;
     if (!el.dataset.orig) el.dataset.orig = el.value;
-    el.value = tok ? el.dataset.orig.split("<你的API密钥>").join(tok)
-                    : el.dataset.orig;
-  }
+    el.value = ti.value.trim()
+      ? el.dataset.orig.split("<你的API密钥>").join(ti.value.trim())
+      : el.dataset.orig;
+  });
 };
-window.switchGuide = (which) => {
-  const full = which === "full";
-  $("#guide-pane").classList.toggle("hidden", !full);
-  $("#skill-pane").classList.toggle("hidden", full);
-  $$("#modal-body .tabs button").forEach(b => b.classList.toggle("active",
-    b.textContent.includes(full ? "完整" : "WorkBuddy")));
-};
-window.copyText = async (txt) => {
-  try {
-    await navigator.clipboard.writeText(txt);
-    toast("已复制到剪贴板");
-  } catch (e) {
-    const ta = document.createElement("textarea");
-    ta.value = txt; document.body.appendChild(ta); ta.select();
-    try { document.execCommand("copy"); toast("已复制到剪贴板"); }
-    catch (e2) { toast("复制失败，请手动选中"); }
-    document.body.removeChild(ta);
-  }
-};
-window.copyGuide = (id) => {
-  const el = document.getElementById(id);
-  if (el) copyText(el.value);
-};
-window.downloadGuide = (id, filename) => {
-  const el = document.getElementById(id);
-  if (!el) return;
+window.downloadGuide = () => {
+  const el = document.getElementById("guide-text");
+  if (!el) { toast("生成中，请稍候", 1500); return; }
   const blob = new Blob(["﻿" + el.value], { type: "text/markdown;charset=utf-8" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
-  a.download = filename;
+  a.download = "企业知识库-API接入说明.md";
   document.body.appendChild(a);
   a.click();
   setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
-  toast("已下载 " + filename);
-};
-window.downloadSkillPackage = () => {
-  const a = document.createElement("a");
-  a.href = "/api/v1/admin/skill-package";
-  a.download = "workbuddy-zs-kb.zip";
-  document.body.appendChild(a);
-  a.click();
-  setTimeout(() => a.remove(), 1000);
-  toast("正在下载技能包");
+  toast("已下载 企业知识库-API接入说明.md");
 };
 window.issueToken = async () => {
   const uid = Number($("#tk-user").value);
