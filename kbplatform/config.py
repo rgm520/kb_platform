@@ -17,6 +17,7 @@ class Config:
     fts_path: str = ""
     vector_dir: str = ""
     drive_map: dict[str, str] = field(default_factory=dict)
+    share_names: list[str] = field(default_factory=list)
     llm_model: str = "qwen3.5-9b-64k"
     embed_model: str = "bge-m3"
     embed_dim: int = 1024
@@ -39,6 +40,7 @@ def load_config(path: str) -> Config:
     runtime = raw.get("runtime", {})
     models = raw.get("models", {})
     security = raw.get("security", {})
+    shares = raw.get("shares", {})
     drives = {k.upper(): v for k, v in raw.get("drives", {}).items()}
     return Config(
         monitor_roots=list(mon.get("roots", [])),
@@ -47,6 +49,7 @@ def load_config(path: str) -> Config:
         max_workers=int(runtime.get("max_workers", 1)),
         data_dir=paths.get("data_dir", "D:/opencode/kb/data"),
         drive_map=drives,
+        share_names=list(shares.get("names", [])),
         llm_model=str(models.get("llm", "qwen3.5-9b-64k")),
         embed_model=str(models.get("embed", "bge-m3")),
         embed_dim=int(models.get("embed_dim", 1024)),

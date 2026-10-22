@@ -508,6 +508,74 @@ def make_app(config_path: str = "D:/opencode/config.toml") -> FastAPI:
         return {"id": cur.lastrowid, "user": u["username"], "name": req.name}
 
     # ============================================================ 管理台
+    def _is_restricted_share(conn_, share: str) -> bool:
+        """整个共享被标为涉密。"""
+        r = conn_.execute(
+            "SELECT 1 FROM dir_scopes WHERE share=? AND restricted=1 AND subpath=''",
+            (share,)).fetchone()
+        return r is not None
+
+    def _is_restricted_sub(conn_, share: str, subpath: str) -> bool:
+        """该子目录是否落在某个涉密规则内（自身或其祖先被标记）。"""
+        rules = conn_.execute(
+            "SELECT subpath FROM dir_scopes WHERE share=? AND restricted=1",
+            (share,)).fetchall()
+        s = (subpath or "").lower()
+        for (rule,) in rules:
+            rule = (rule or "").strip("\\").lower()
+            if not rule:
+                return True
+            if s == rule or s.startswith(rule + "\\"):
+                return True
+        return False
+
+    @app.get("/api/v1/admin/scopes/tree")
+    def admin_scope_tree(ctx=Depends(require_admin)):
+        """授权目录选择器的数据源。
+
+        共享根来自盘符映射（[drives]），子目录**实时枚举 NAS** 得到，
+        而不是只列已索引的——否则未接入监控的共享没法挑具体目录。
+        每个子目录附带 catalog 里已索引的文件数。
+        """
+        from kbplatform import nas as nas_mod
+        roots = nas_mod.share_roots(cfg.drive_map, cfg.share_names)
+        counts = {}
+        for row in conn.execute(
+                "SELECT share, rel_path, COUNT(*) n FROM catalog GROUP BY share, rel_path"):
+            share, rel, n = row[0], row[1] or "", row[2]
+            segs = [s for s in rel.split("\\") if s]
+            for depth in range(1, min(len(segs), 4)):
+                d = "\\".join(segs[:depth])
+                counts[(share, d)] = counts.get((share, d), 0) + n
+        share_files = {}
+        for (share, _d), n in counts.items():
+            share_files[share] = share_files.get(share, 0) + n
+
+        shares = []
+        for name, unc in roots:
+            dirs = nas_mod.list_subdirs(unc)
+            shares.append({
+                "name": name,
+                "unc": unc,
+                "files": share_files.get(name, 0),
+                "restricted": _is_restricted_share(conn, name),
+                "subdirs": [{"path": d, "files": counts.get((name, d), 0),
+                              "restricted": _is_restricted_sub(conn, name, d)}
+                             for d in dirs],
+            })
+        return {"shares": shares}
+
+    @app.get("/api/v1/admin/scopes/expand")
+    def admin_scope_expand(share: str = "", subpath: str = "",
+                           ctx=Depends(require_admin)):
+        """展开某目录的下一层子目录。"""
+        from kbplatform import nas as nas_mod
+        roots = dict(nas_mod.share_roots(cfg.drive_map, cfg.share_names))
+        unc = roots.get(share)
+        if not unc:
+            raise HTTPException(404, detail="共享不存在")
+        return {"subdirs": nas_mod.expand_subdir(unc, subpath)}
+
     @app.get("/api/v1/admin/users")
     def admin_users(ctx=Depends(require_admin)):
         rows = conn.execute("SELECT id,username,display_name,role,dept,active,created_at"

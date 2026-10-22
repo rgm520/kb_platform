@@ -390,20 +390,102 @@ window.toggleActive = async (id, active) => {
     toast(active ? "已启用" : "已停用"); loadAdmin();
   } catch (e) { toast("操作失败: " + e.message); }
 };
-window.grantUser = (id) => {
-  openModal(`<h3>授权可见目录（用户 #${id}）</h3>
-    <p class="muted">格式：共享 + 子目录（子目录留空表示整共享）。多个用换行分隔。</p>
-    <textarea id="g-scope" style="width:100%;height:120px;background:#1c232c;color:#e6edf3;border:1px solid #2a333d;border-radius:6px;padding:8px"
-      placeholder="信息化管理&#10;综合系统\\2.党建（党）"></textarea>
-    <button class="primary" onclick="saveScopes(${id})">保存</button>`);
+window.grantUser = async (id) => {
+  let tree;
+  try {
+    tree = await api("/api/v1/admin/scopes/tree");
+  } catch (e) {
+    toast("加载目录清单失败: " + e.message);
+    return;
+  }
+  const cur = await api("/api/v1/admin/users");
+  const u = (cur.users || []).find(x => x.id === id) || {};
+  const granted = new Set((u.scopes || []).map(s => s));
+
+  openModal(`<h3>授权可见目录 — ${esc(u.display_name || u.username || ("用户#" + id))}</h3>
+    <p class="muted">先选共享，再勾选要开放的子目录。勾选「整个共享」= 该共享下所有内容都可见。</p>
+    <div class="form-row" style="margin:12px 0">
+      <label>共享<select id="sc-share" onchange="renderScopeDirs()">${
+        tree.shares.map(s => `<option value="${esc(s.name)}">${esc(s.name)}（${s.files} 个已索引文件）</option>`).join("")
+      }</select></label>
+      <label>当前已授权<input id="sc-current" class="inline" value="${esc((u.scopes || []).join(" ; ") || "（无）")}" readonly></label>
+    </div>
+    <div id="sc-dirs" style="max-height:260px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:8px"></div>
+    <div id="sc-err" class="err"></div>
+    <div class="modal-foot" style="display:flex;gap:8px;justify-content:space-between;align-items:center">
+      <span class="muted" id="sc-count"></span>
+      <span>
+        <button onclick="closeModal()">取消</button>
+        <button class="primary" onclick="saveScopes(${id})">保存授权</button>
+      </span>
+    </div>`);
+  state.scopeTree = tree;
+  state.scopeUserId = id;
+  state.scopeSelected = new Set(granted);
+  renderScopeDirs();
+};
+window.renderScopeDirs = () => {
+  const share = $("#sc-share").value;
+  const s = (state.scopeTree.shares || []).find(x => x.name === share) || { subdirs: [] };
+  const box = $("#sc-dirs");
+  const cur = state.scopeSelected;
+  const all = cur.has(share);
+  const R = '<span class="tag" style="background:#4a1d1d;color:#f85149;border:1px solid #5c2222">涉密</span>';
+  let html = `<label class="chk" style="padding:5px 6px;border-bottom:1px solid var(--line)">
+      <input type="checkbox" id="sc-all" ${all ? "checked" : ""} onchange="toggleScopeAll(${JSON.stringify(share).replace(/"/g, "&quot;")})">
+      <b>整个共享（${esc(share)}）</b> ${s.restricted ? R : ""}
+      <span class="muted">— 该共享下所有文件</span></label>`;
+  if (!s.subdirs.length) {
+    html += `<div class="muted" style="padding:10px">该共享下没有可授权的子目录。勾选上面的「整个共享」即可授权全部。</div>`;
+  }
+  for (const d of s.subdirs) {
+    const key = share + "\\" + d.path;
+    const on = cur.has(key);
+    html += `<label class="chk" style="padding:4px 6px">
+      <input type="checkbox" ${on ? "checked" : ""} onchange="toggleScopeDir(${JSON.stringify(key).replace(/"/g, "&quot;")})">
+      <span>${esc(d.path)}</span> ${d.restricted ? R : ""}
+      ${d.files ? `<span class="muted">（${d.files} 个已索引文件）</span>` : '<span class="muted">（未索引）</span>'}</label>`;
+  }
+  box.innerHTML = html;
+  updateScopeCount();
+};
+window.toggleScopeAll = (share) => {
+  const on = $("#sc-all").checked;
+  const s = (state.scopeTree.shares || []).find(x => x.name === share) || { subdirs: [] };
+  if (on) {
+    state.scopeSelected.add(share);
+    for (const d of s.subdirs) state.scopeSelected.add(share + "\\" + d.path);
+  } else {
+    state.scopeSelected.delete(share);
+    for (const d of s.subdirs) state.scopeSelected.delete(share + "\\" + d.path);
+  }
+  renderScopeDirs();
+};
+window.toggleScopeDir = (key) => {
+  if (state.scopeSelected.has(key)) state.scopeSelected.delete(key);
+  else state.scopeSelected.add(key);
+  updateScopeCount();
+};
+window.updateScopeCount = () => {
+  const n = state.scopeSelected.size;
+  const el = $("#sc-count");
+  if (el) el.textContent = "已选 " + n + " 项";
 };
 window.saveScopes = async (id) => {
-  const lines = $("#g-scope").value.split("\n").map(s => s.trim()).filter(Boolean);
+  const scopes = Array.from(state.scopeSelected).map(k => {
+    const i = k.indexOf("\\");
+    return i < 0 ? [k, ""] : [k.slice(0, i), k.slice(i + 1)];
+  });
+  if (!scopes.length) {
+    $("#sc-err").textContent = "请至少选择一项";
+    return;
+  }
   try {
-    await api(`/api/v1/admin/users/${id}/scopes`, { method: "PUT",
-      body: { scopes: lines.map(l => { const i = l.indexOf("\\"); return i < 0 ? [l, ""] : [l.slice(0, i), l.slice(i + 1)]; }) } });
-    closeModal(); toast("已保存可见范围"); loadAdmin();
-  } catch (e) { toast("保存失败: " + e.message); }
+    await api(`/api/v1/admin/users/${id}/scopes`, { method: "PUT", body: { scopes } });
+    closeModal();
+    toast("已保存可见范围（" + scopes.length + " 项）");
+    loadAdmin();
+  } catch (e) { $("#sc-err").textContent = e.message; }
 };
 window.issueTokenFor = async (uid, name) => {
   // 兼容旧入口：统一走 API 密钥页的签发表单
