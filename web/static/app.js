@@ -739,15 +739,22 @@ async function adminTokens(body) {
       ${cur ? '<button onclick="clearTokenFilter()">显示全部用户</button>' : ""}
       <button onclick="openApiGuide()">📖 API 调用手册</button>
     </div>
-    <div class="muted" style="margin-bottom:8px">明文只显示一次，请立即交给用户。用户与其密钥是 1:N 关系——同一用户可签发多枚（如不同机器各一枚）。</div>
-    <table><thead><tr><th>ID</th><th>用户</th><th>前缀</th><th>备注</th><th>状态</th><th>创建</th><th>最后使用</th><th>过期</th><th>操作</th></tr></thead><tbody>
-    ${shown.length ? shown.map(t => `<tr><td>${t.id}</td><td>${esc(uname(t.user_id))}</td><td><code>${esc(t.prefix)}</code></td>
+    <div class="err" style="margin-bottom:8px">
+      <b>列表里显示的是「密钥前缀」（前 12 位，用来人工辨认），不是密钥本身。</b><br>
+      拿前缀去调接口一定会返回 <b>401</b>。密钥明文只在<b>签发那一刻显示一次</b>，
+      之后库里只存哈希、无法找回。弄丢了就在这里点「重新签发」换一个新的。
+    </div>
+    <div class="muted" style="margin-bottom:8px">用户与其密钥是 1:N 关系——同一用户可签发多枚（如不同机器各一枚）。</div>
+    <table><thead><tr><th>ID</th><th>用户</th><th>密钥前缀（非密钥）</th><th>备注</th><th>状态</th><th>创建</th><th>最后使用</th><th>过期</th><th>操作</th></tr></thead><tbody>
+    ${shown.length ? shown.map(t => `<tr><td>${t.id}</td><td>${esc(uname(t.user_id))}</td>
+      <td><code title="这只是前缀，不是密钥；用它调接口会 401">${esc(t.prefix)}</code></td>
       <td>${esc(t.label || "")}</td><td><span class="badge ${t.revoked ? "failed" : "done"}">${t.revoked ? "已吊销" : "有效"}</span></td>
       <td class="muted">${fmtTime(t.created_at)}</td><td class="muted">${fmtTime(t.last_used_at)}</td>
       <td class="muted">${fmtTime(t.expires_at)}</td>
       <td>${t.revoked
           ? `<button class="sm" onclick="purgeToken(${t.id})">删除</button>`
-          : `<button class="sm" onclick="revokeToken(${t.id})">吊销</button>`}</td></tr>`).join("")
+          : `<button class="sm" onclick="reissueToken(${t.id}, ${t.user_id})">重新签发</button>
+             <button class="sm" onclick="revokeToken(${t.id})">吊销</button>`}</td></tr>`).join("")
       : '<tr><td colspan="9" class="muted">没有密钥</td></tr>'}
     </tbody></table>
     <p class="muted">吊销后密钥立即失效但记录保留；再点「删除」才会从库中彻底移除（已吊销的才可删）。</p>`;
@@ -804,14 +811,55 @@ window.issueToken = async () => {
   try {
     const r = await api(`/api/v1/admin/tokens?user_id=${uid}`, { method: "POST",
       body: { label: label || null, ttl_days: ttl } });
-    openModal(`<h3>密钥已签发</h3>
-      <p class="muted">用户 ${esc($("#tk-user").selectedOptions[0].textContent)}。这是唯一一次显示明文，请立即交给用户。</p>
-      <div style="background:#1c232c;padding:12px;border-radius:6px;font-family:monospace;word-break:break-all">${esc(r.token)}</div>
-      <p class="muted" style="margin-top:10px">交给用户后，让他们配置到 WorkBuddy：
-      环境变量 <code>ZB_KB_TOKEN</code>。</p>`);
+    showTokenModal(r.token, $("#tk-user").selectedOptions[0].textContent);
     state.tokenLabel = "";
     loadAdmin();
   } catch (e) { toast("签发失败: " + e.message); }
+};
+window.reissueToken = async (id, userId) => {
+  if (!confirm("重新签发会吊销旧密钥并生成新密钥（旧密钥立即失效）。继续？")) return;
+  try {
+    await api("/api/v1/admin/tokens/" + id, { method: "DELETE" });
+    const r = await api("/api/v1/admin/tokens?user_id=" + userId, { method: "POST",
+      body: { label: "重新签发", ttl_days: 90 } });
+    showTokenModal(r.token, "用户 #" + userId);
+    loadAdmin();
+  } catch (e) { toast("失败: " + e.message); }
+};
+window.showTokenModal = function (token, who) {
+  openModal(`<h3>密钥已签发</h3>
+    <div class="err" style="margin-bottom:10px">
+      <b>这是唯一一次显示明文</b>，关掉就再也看不到了（库里只存哈希，无法还原）。
+      请立刻复制给本人。
+    </div>
+    <div style="background:#1c232c;padding:12px;border-radius:6px;font-family:Consolas,monospace;
+         word-break:break-all;user-select:all" id="new-token">${esc(token)}</div>
+    <p class="muted" style="margin-top:10px">
+      交给用户后，让 AI 配成环境变量 <code>ZB_KB_TOKEN</code>；
+      请求头写 <code>Authorization: Bearer &lt;这串密钥&gt;</code>。
+      ${who ? "<br>签发给：" + esc(who) : ""}
+    </p>
+    <div class="modal-foot" style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="primary" onclick="copyTokenPlain()">复制密钥</button>
+      <button onclick="closeModal()">我已复制</button>
+    </div>`);
+};
+window.copyTokenPlain = async () => {
+  const el = document.getElementById("new-token");
+  if (!el) { toast("找不到密钥内容", 1500); return; }
+  await copyText(el.textContent);
+};
+window.copyText = async (txt) => {
+  try {
+    await navigator.clipboard.writeText(txt);
+    toast("已复制到剪贴板");
+  } catch (e) {
+    const ta = document.createElement("textarea");
+    ta.value = txt; document.body.appendChild(ta); ta.select();
+    try { document.execCommand("copy"); toast("已复制到剪贴板"); }
+    catch (e2) { toast("复制失败，请手动选中上面的文本"); }
+    document.body.removeChild(ta);
+  }
 };
 window.filterTokensOf = (uid) => {
   state.tokenUserFilter = uid;

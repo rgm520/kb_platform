@@ -614,7 +614,7 @@ def make_app(config_path: str = "D:/opencode/config.toml") -> FastAPI:
 
     # ============================================================ 模型
     @app.get("/api/v1/models")
-    def api_models(ctx=Depends(actor), only_usable: bool = False):
+    def api_models(ctx=Depends(actor), only_usable: bool = True):
         """模型列表。
 
         默认只返回**可用**的模型——没配 API Key 的云端模型、连不上的 Ollama
