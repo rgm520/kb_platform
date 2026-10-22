@@ -58,15 +58,26 @@ def _delete_artifacts(conn: sqlite3.Connection, fts_path: str, vs, file_path: st
     conn.commit()
 
 
-def _insert_chunks(conn: sqlite3.Connection, file_path: str, chunks: list[dict]) -> list[int]:
+def _insert_chunks(conn: sqlite3.Connection, fts_path: str, vs,
+                   file_path: str, chunks: list[dict]) -> list[int]:
     """替换某文件的块。旧的块连同其 knowledge / edges / vectors 必须一起清掉，
-    否则重跑会产生孤儿知识（knowledge 行数多于 chunks 数）与重复图谱节点。"""
+    否则重跑会产生孤儿知识（knowledge 行数多于 chunks 数）与重复图谱节点。
+
+    **FTS 行与向量库也必须清**：旧 chunk id 被回收后，FTS 里残留的 rowid 会在
+    检索时被召回，再被 JOIN catalog 丢掉 —— 白占 top-k 名额，把真命中挤掉
+    （向量库同理：旧 id 仍被当作有效向量参与相似度排序）。
+    """
     old_ids = _chunks_of(conn, file_path)
     if old_ids:
         marks = ",".join("?" * len(old_ids))
         conn.execute(f"DELETE FROM vectors WHERE chunk_id IN ({marks})", old_ids)
         conn.execute(f"DELETE FROM knowledge WHERE chunk_id IN ({marks})", old_ids)
         conn.execute(f"DELETE FROM edges WHERE chunk_id IN ({marks})", old_ids)
+        try:
+            vs.remove(old_ids)
+        except Exception:
+            pass
+        fts.delete(fts_path, old_ids)
     conn.execute("DELETE FROM chunks WHERE file_path=?", (file_path,))
     ids = []
     for c in chunks:
@@ -121,7 +132,8 @@ def index_file(conn: sqlite3.Connection, fts_path: str, vs, catalog_id: int,
         chunks = chunker.chunk_blocks(blocks)
         if not chunks:
             return _fail(conn, catalog_id, "分块结果为空")
-        chunk_ids = _insert_chunks(conn, unc_path, chunks)
+        # _insert_chunks 负责清掉旧块的 FTS 行与向量条目，再写入新块。
+        chunk_ids = _insert_chunks(conn, fts_path, vs, unc_path, chunks)
         texts = [c["text"] for c in chunks]
 
         fts.upsert(fts_path, list(zip(chunk_ids, texts)))

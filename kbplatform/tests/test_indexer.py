@@ -98,6 +98,28 @@ def test_process_changes_handles_added_modified_removed(tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] == 0
 
 
+def test_reindex_does_not_leave_orphan_fts_rows(tmp_path):
+    """重跑索引必须清掉旧块的 FTS 行。
+
+    旧块 id 被删除后，FTS 里若还留着这些 rowid，检索会把它们召回，
+    再被 JOIN catalog 丢掉 —— 白占 top-k 名额，真命中被挤掉。
+    """
+    conn, fts_path, vs, cid, path = _setup(tmp_path)
+    index_file(conn, fts_path, vs, cid, path)
+    old_ids = [r[0] for r in conn.execute("SELECT id FROM chunks").fetchall()]
+    assert old_ids
+
+    index_file(conn, fts_path, vs, cid, path)
+
+    new_ids = {r[0] for r in conn.execute("SELECT id FROM chunks").fetchall()}
+    assert new_ids.isdisjoint(old_ids), "重索引应分配新的 chunk id"
+
+    hits = search(fts_path, "信创", 50)
+    assert hits, "重索引后应仍能检索到内容"
+    orphan = [cid_ for cid_, _ in hits if cid_ not in new_ids]
+    assert orphan == [], f"FTS 残留孤儿行: {orphan}"
+
+
 def test_reindex_does_not_leave_orphan_knowledge(tmp_path):
     """重跑索引必须清掉旧块的 knowledge / edges，否则 knowledge 行数会多于 chunks。"""
     conn, fts_path, vs, cid, path = _setup(tmp_path)

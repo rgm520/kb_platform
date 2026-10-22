@@ -31,9 +31,11 @@ import urllib.request
 from kbplatform.config import load_config
 
 HEALTH_URL = "http://127.0.0.1:8000/health"
-HEALTH_TIMEOUT = 8
-HEALTH_FAIL_THRESHOLD = 3
+HEALTH_TIMEOUT = 15          # 8 秒太紧：服务正忙时一次探测就会误判失败
+HEALTH_FAIL_THRESHOLD = 3    # 连续 3 次失败才重启
 RESTART_BACKOFF = 5
+# 重启后给服务留的暖机时间，期间不做健康判定
+WARMUP_SEC = 20
 
 
 class Child:
@@ -99,6 +101,9 @@ class Child:
             self.spawn()
             return
         if self.health:
+            # 刚启动的子进程留暖机时间，避免启动期探测失败被误判
+            if time.time() - self.started_at < WARMUP_SEC:
+                return
             if self.check_health():
                 self.fails = 0
             else:

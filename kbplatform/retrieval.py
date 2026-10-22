@@ -34,6 +34,7 @@ class Hit:
     score: float
     matched_by: list[str] = field(default_factory=list)
     restricted: bool = False
+    document_id: int | None = None
 
 
 def _rrf(rank_lists: list[list[int]], k: int = 60) -> list[tuple[int, float]]:
@@ -61,11 +62,12 @@ class Retriever:
         marks = ",".join("?" * len(chunk_ids))
         rows = self.conn.execute(
             f"""SELECT ch.id, ch.file_path, ch.text, ch.locator,
-                       c.share, c.rel_path
+                       c.share, c.rel_path, c.id
                 FROM chunks ch JOIN catalog c ON c.path = ch.file_path
                 WHERE ch.id IN ({marks})""", chunk_ids).fetchall()
         return {r[0]: {"file_path": r[1], "text": r[2], "locator": r[3],
-                       "share": r[4], "rel_path": r[5]} for r in rows}
+                       "share": r[4], "rel_path": r[5], "document_id": r[6]}
+                for r in rows}
 
     def _allowed_chunk_ids(self, user_id: int | None) -> set[int] | None:
         """返回允许的 chunk_id 集合。None 表示不限制（管理员/内部调用）。"""
@@ -196,7 +198,8 @@ class Retriever:
                 continue
             rest = any(s.covers(m["share"], m["rel_path"]) for s in restricted)
             hits.append(Hit(cid, m["file_path"], m["share"], m["rel_path"],
-                            m["text"], m["locator"], sc, matched.get(cid, []), rest))
+                            m["text"], m["locator"], sc, matched.get(cid, []), rest,
+                            m.get("document_id")))
 
         return hits, {"keyword": len(k_ids), "vector": len(v_ids),
                       "wiki": len(wiki_ids), "graph": 0}

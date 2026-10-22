@@ -14,6 +14,7 @@ import json
 import os
 import secrets
 import time
+import urllib.parse
 from typing import Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, Body
@@ -318,6 +319,10 @@ def make_app(config_path: str = "D:/opencode/config.toml") -> FastAPI:
                 c["snippet"] = h.text[:200]
                 if want_text:
                     c["text"] = h.text
+            # 让 AI 能顺着片段找到整篇文档
+            c["document_id"] = h.document_id
+            c["content_url"] = f"/api/v1/documents/{h.document_id}/content"
+            c["download_url"] = f"/api/v1/documents/{h.document_id}/download"
             citations.append(c)
 
         if token_prefix:
@@ -516,20 +521,96 @@ def make_app(config_path: str = "D:/opencode/config.toml") -> FastAPI:
         return {"total": total, "by_status": by_status, "tier1_done": tier1,
                 "tier2_done": tier2, "non_document_files": non_doc}
 
-    @app.get("/api/v1/documents/{catalog_id}")
-    def api_document(catalog_id: int, ctx=Depends(actor)):
-        u = ctx["user"]
-        pred, params = scope_predicate(u)
+    def _get_catalog_row(catalog_id: int, user: dict):
+        """按可见范围取 catalog 行，取不到一律 404（不区分不存在与不可见）。"""
+        pred, params = scope_predicate(user)
         r = conn.execute(
-            f"SELECT c.* FROM catalog c WHERE c.id=? AND {pred}", [catalog_id] + params).fetchone()
+            f"SELECT c.* FROM catalog c WHERE c.id=? AND {pred}",
+            [catalog_id] + params).fetchone()
         if r is None:
             raise HTTPException(404, detail="文档不存在或不可见")
-        d = dict(r)
+        return dict(r)
+
+    @app.get("/api/v1/documents/{catalog_id}")
+    def api_document(catalog_id: int, ctx=Depends(actor)):
+        d = _get_catalog_row(catalog_id, ctx["user"])
         kps = conn.execute(
             "SELECT summary, key_points FROM knowledge WHERE file_path=? ORDER BY chunk_id",
             (d["path"],)).fetchall()
         d["knowledge"] = [{"summary": k[0], "key_points": json.loads(k[1])} for k in kps]
+        d["content_url"] = f"/api/v1/documents/{catalog_id}/content"
+        d["download_url"] = f"/api/v1/documents/{catalog_id}/download"
+        d["knowledge_url"] = f"/api/v1/documents/{catalog_id}/knowledge"
         return d
+
+    @app.get("/api/v1/documents/{catalog_id}/content")
+    def api_document_content(catalog_id: int, ctx=Depends(actor)):
+        """取文档的**完整纯文本**（所有块按顺序拼接）。
+
+        检索/问答只返回命中的片段；AI 需要通读全文时用这个。
+        涉密文档的原文**不回传**（返回 403），与平台的出网管控一致。
+        """
+        d = _get_catalog_row(catalog_id, ctx["user"])
+        if _is_restricted_sub(conn, d["share"], d["rel_path"]):
+            raise HTTPException(403, detail="该文档位于涉密目录，不提供原文内容")
+        rows = conn.execute(
+            "SELECT chunk_idx, text, locator FROM chunks WHERE file_path=? ORDER BY chunk_idx",
+            (d["path"],)).fetchall()
+        text = "\n\n".join(r[1] or "" for r in rows)
+        return {
+            "document_id": catalog_id,
+            "name": d["name"],
+            "path": d["path"],
+            "chars": len(text),
+            "chunks": len(rows),
+            "locators": [r[2] for r in rows],
+            "text": text,
+        }
+
+    @app.get("/api/v1/documents/{catalog_id}/knowledge")
+    def api_document_knowledge(catalog_id: int, ctx=Depends(actor)):
+        """取文档提炼出的知识点与关系（不返回原文，避免涉密外流）。"""
+        d = _get_catalog_row(catalog_id, ctx["user"])
+        rows = conn.execute(
+            "SELECT chunk_id, summary, key_points, relations FROM knowledge "
+            "WHERE file_path=? ORDER BY chunk_id", (d["path"],)).fetchall()
+        out = []
+        for r in rows:
+            out.append({
+                "chunk_id": r[0], "summary": r[1],
+                "key_points": json.loads(r[2] or "[]"),
+                "relations": json.loads(r[3] or "[]"),
+            })
+        n_kp = sum(len(o["key_points"]) for o in out)
+        n_rel = sum(len(o["relations"]) for o in out)
+        return {"document_id": catalog_id, "name": d["name"],
+                "chunks": len(out), "key_points": n_kp, "relations": n_rel,
+                "knowledge": out}
+
+    @app.get("/api/v1/documents/{catalog_id}/download")
+    def api_document_download(catalog_id: int, ctx=Depends(actor)):
+        """下载**原始文件**（从 NAS 流式读取）。
+
+        涉密目录的原文不提供下载。
+        """
+        d = _get_catalog_row(catalog_id, ctx["user"])
+        if _is_restricted_sub(conn, d["share"], d["rel_path"]):
+            raise HTTPException(403, detail="该文档位于涉密目录，不提供原文下载")
+        path = d["path"]
+        if not os.path.exists(path):
+            raise HTTPException(404, detail="源文件已不存在")
+        fname = d["name"]
+        # 文件名含中文/空格时用 RFC 5987 编码，兼容老客户端
+        quoted = urllib.parse.quote(fname)
+        return FileResponse(
+            path,
+            media_type="application/octet-stream",
+            headers={
+                "Content-Disposition":
+                    f"attachment; filename*=UTF-8''{quoted}",
+                "X-Document-Id": str(catalog_id),
+            },
+        )
 
     # ============================================================ 模型
     @app.get("/api/v1/models")
@@ -592,9 +673,12 @@ def make_app(config_path: str = "D:/opencode/config.toml") -> FastAPI:
             st = models_mod.check_usable(m)
             if st["usable"]:
                 labels.append(f"`{m.name}` (id={m.id}, model_id={m.model_id})")
+        from kbplatform import api_guide as guide_mod
+        deploy = guide_mod.build_deploy_info(
+            os.path.dirname(APP_DIR).replace("\\", "/"))
         return {
             "base_url": base,
-            "guide": guide_mod.build_guide(base, tok, labels),
+            "guide": guide_mod.build_guide(base, tok, labels, deploy),
             "skill_snippet": guide_mod.build_skill_snippet(base + "/api/v1", tok),
             "note": ("密钥明文只在签发时显示一次，库里只有哈希，无法还原。"
                      "请从「API 密钥」列表里用你自己的密钥替换占位符。"),
