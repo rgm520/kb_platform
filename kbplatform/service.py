@@ -16,8 +16,8 @@ import secrets
 import time
 from typing import Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, Body
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -514,6 +514,30 @@ def make_app(config_path: str = "D:/opencode/config.toml") -> FastAPI:
         """添加模型对话框里的预置模板（不落库）。"""
         return {"presets": models_mod.PRESETS}
 
+    @app.get("/api/v1/admin/parse-pool")
+    def admin_parse_pool(ctx=Depends(require_admin)):
+        """文档解析算力池状态。"""
+        pool = models_mod.ParsePool(conn)
+        st = pool.status()
+        st["note"] = ("向量化模型必须全局唯一（bge-m3），混用会污染向量空间；"
+                      "池内只放生成模型。")
+        return st
+
+    @app.put("/api/v1/admin/parse-pool")
+    def admin_set_parse_pool(ctx=Depends(require_admin),
+                             body: dict = Body(...)):
+        """设置哪些模型参与文档解析，以及各自的调度权重。"""
+        members = body.get("members") or []
+        ids = set()
+        for m in members:
+            mid = int(m.get("id"))
+            ids.add(mid)
+            models_mod.update_pool_member(conn, mid, True, float(m.get("weight", 1)))
+        for m in models_mod.list_models(conn):
+            if m.in_parse_pool and m.id not in ids:
+                models_mod.update_pool_member(conn, m.id, False, m.pool_weight)
+        return models_mod.ParsePool(conn).status()
+
     @app.post("/api/v1/admin/models/test")
     def admin_test_model(model_id: int, ctx=Depends(require_admin)):
         """测试模型连通性与上下文配置。
@@ -792,7 +816,25 @@ def make_app(config_path: str = "D:/opencode/config.toml") -> FastAPI:
 
         @app.get("/")
         def index():
-            return FileResponse(os.path.join(WEB_DIR, "index.html"))
+            """首页。静态资源 URL 自动带上文件 mtime 作为版本号。
+
+            浏览器会缓存 app.js，改了前端不换版本号，用户就跑的是旧代码
+            （这个坑踩过好几次）。这里用 mtime 自动做版本，无需人工维护。
+            """
+            fp = os.path.join(WEB_DIR, "index.html")
+            try:
+                with open(fp, "r", encoding="utf-8") as f:
+                    html = f.read()
+                for name in ("app.js", "style.css", "cytoscape.min.js"):
+                    p = os.path.join(WEB_DIR, "static", name)
+                    try:
+                        v = int(os.path.getmtime(p))
+                    except OSError:
+                        v = 0
+                    html = html.replace(f'/static/{name}"', f'/static/{name}?v={v}"')
+                return Response(content=html, media_type="text/html; charset=utf-8")
+            except OSError:
+                return FileResponse(fp)
 
         @app.get("/{page:path}")
         def spa(page: str):

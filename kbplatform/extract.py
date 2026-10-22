@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import time
+import time
 from dataclasses import dataclass
 
 import kb.graph as pgraph
@@ -16,6 +17,7 @@ import kb.llm as llm
 from kb.llm import EXTRACTION_SCHEMA
 from kb.store import Store
 
+from kbplatform import models as models_mod
 from kbplatform.db import set_status
 
 EXTRACT_PROMPT = """你是企业知识库构建助手。阅读下面的文档片段，抽取其中的知识点。
@@ -42,39 +44,71 @@ class ExtractResult:
     error: str | None
 
 
-def extract_file(conn, catalog_id: int, unc_path: str, chunk_ids: list[int],
-                 model: str = "qwen3.5-9b-64k") -> ExtractResult:
-    """对文件的每个块做 LLM 抽取，写入 knowledge 与图谱。"""
-    n_kp = n_rel = 0
-    for cid in chunk_ids:
-        row = conn.execute("SELECT text FROM chunks WHERE id=?", (cid,)).fetchone()
-        if not row or not row[0]:
-            continue
-        try:
-            obj, _meta = llm.chat_json(
-                EXTRACT_PROMPT.format(chunk=row[0]),
-                schema=EXTRACTION_SCHEMA,
-                model=model,
-                num_predict=2500,
-                think=False,
-                temperature=0.2,
-            )
-        except Exception as e:
-            msg = f"提炼失败: {type(e).__name__}: {e}"
-            set_status(conn, catalog_id, "failed", msg)
-            return ExtractResult(catalog_id, n_kp, n_rel, False, msg)
+def _call_pool_member(member, prompt: str) -> tuple[dict, dict]:
+    """用池里的某个成员做结构化生成。
 
-        import json as _json
-        conn.execute(
-            "INSERT INTO knowledge(file_path, chunk_id, summary, key_points, relations, raw, created_at)"
-            " VALUES (?,?,?,?,?,?,?)",
-            (unc_path, cid, obj.get("summary", ""),
-             _json.dumps(obj.get("key_points", []), ensure_ascii=False),
-             _json.dumps(obj.get("relations", []), ensure_ascii=False),
-             _json.dumps(obj, ensure_ascii=False), time.time()))
-        pgraph.build_from_extraction(Store.from_conn(conn), unc_path, cid, obj)
-        n_kp += len(obj.get("key_points", []))
-        n_rel += len(obj.get("relations", []))
+    远端 Ollama 必须带 base（地址）与 num_ctx（上下文覆盖），
+    否则请求会打到本机、且长提示被静默截断。
+    """
+    extra = member.extra or {}
+    return llm.chat_json(
+        prompt, schema=EXTRACTION_SCHEMA,
+        model=member.model_id,
+        num_predict=2500, think=False, temperature=0.2,
+        base=member.base_url,
+        num_ctx=extra.get("num_ctx"),
+        keep_alive=extra.get("keep_alive", "30m"),
+    )
+
+
+def extract_file(conn, catalog_id: int, unc_path: str, chunk_ids: list[int],
+                 model: str = "qwen3.5-9b-64k", pool=None) -> ExtractResult:
+    """对文件的每个块做 LLM 抽取，写入 knowledge 与图谱。
+
+    model   指定模型（单模型模式）。为空且给了 pool 则走**算力池**。
+    pool    models_mod.ParsePool 实例；按文档分派（同一份文档固定一个成员），
+            不同文档分给不同成员，吞吐叠加且每份文档内部风格一致。
+    """
+    member = None
+    if pool is not None and not model:
+        member = pool.pick()
+        if member is None:
+            return ExtractResult(catalog_id, 0, 0, False, "算力池当前无可用成员（都在忙或不可用）")
+
+    n_kp = n_rel = 0
+    try:
+        for cid in chunk_ids:
+            row = conn.execute("SELECT text FROM chunks WHERE id=?", (cid,)).fetchone()
+            if not row or not row[0]:
+                continue
+            prompt = EXTRACT_PROMPT.format(chunk=row[0])
+            try:
+                if member is not None:
+                    obj, _meta = _call_pool_member(member, prompt)
+                else:
+                    obj, _meta = llm.chat_json(
+                        prompt, schema=EXTRACTION_SCHEMA, model=model,
+                        num_predict=2500, think=False, temperature=0.2)
+            except Exception as e:
+                msg = f"提炼失败: {type(e).__name__}: {e}"
+                set_status(conn, catalog_id, "failed", msg)
+                return ExtractResult(catalog_id, n_kp, n_rel, False, msg)
+
+            import json as _json
+            conn.execute(
+                "INSERT INTO knowledge(file_path, chunk_id, summary, key_points, relations, raw, created_at)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (unc_path, cid, obj.get("summary", ""),
+                 _json.dumps(obj.get("key_points", []), ensure_ascii=False),
+                 _json.dumps(obj.get("relations", []), ensure_ascii=False),
+                 _json.dumps(obj, ensure_ascii=False), time.time()))
+            pgraph.build_from_extraction(Store.from_conn(conn), unc_path, cid, obj)
+            n_kp += len(obj.get("key_points", []))
+            n_rel += len(obj.get("relations", []))
+    finally:
+        if member is not None and pool is not None:
+            pool.release(member)
+
     conn.commit()
     conn.execute("UPDATE catalog SET tier2_done=1, kp_count=?, updated_at=? WHERE id=?",
                  (n_kp, time.time(), catalog_id))

@@ -7,6 +7,7 @@ from kbplatform import catalog as cat
 from kbplatform import fts
 from kbplatform import indexer
 from kbplatform import extract as extract_mod
+from kbplatform import models as models_mod
 from kbplatform.config import Config
 from kbplatform.db import init_db, upsert_catalog, bump_stats
 from kbplatform.jobs import JobQueue
@@ -23,6 +24,8 @@ class Pipeline:
         self.monitor = Monitor(self.conn, config.monitor_roots, config.drive_map,
                                qps=config.scan_qps,
                                poll_interval=config.poll_interval_sec)
+        # 解析算力池：本地 + 远端多个大模型，按权重调度
+        self.pool = models_mod.ParsePool(self.conn)
         self._warm_snapshot()
 
     def _warm_snapshot(self) -> None:
@@ -105,8 +108,13 @@ class Pipeline:
             if row:
                 chunk_ids = [r[0] for r in self.conn.execute(
                     "SELECT id FROM chunks WHERE file_path=?", (row[0],)).fetchall()]
-                res = extract_mod.extract_file(self.conn, job.catalog_id, row[0],
-                                               chunk_ids, model=self.cfg.llm_model)
+                # 有可用池成员就走算力池（本地+远端分担）；池空则退回单模型
+                if self.pool.members():
+                    res = extract_mod.extract_file(self.conn, job.catalog_id, row[0],
+                                                   chunk_ids, model="", pool=self.pool)
+                else:
+                    res = extract_mod.extract_file(self.conn, job.catalog_id, row[0],
+                                                   chunk_ids, model=self.cfg.llm_model)
                 if res.ok:
                     stats["extracted"] += 1
                 else:

@@ -525,13 +525,16 @@ window.addRestricted = async () => {
 };
 
 async function adminModels(body) {
-  const [r, pr] = await Promise.all([
+  const [r, pr, pool] = await Promise.all([
     api("/api/v1/models?only_usable=false"),
     api("/api/v1/admin/models/presets"),
+    api("/api/v1/admin/parse-pool"),
   ]);
   const usable = r.models.filter(m => m.usable);
   const unusable = r.models.filter(m => !m.usable);
   state.modelPresets = pr.presets;
+  const inPool = {};
+  for (const m of (pool.members || [])) inPool[m.id] = m;
 
   body.innerHTML = `
     <div class="form-row">
@@ -539,16 +542,27 @@ async function adminModels(body) {
       ${unusable.length ? `<button onclick="dropUnusable()">清理 ${unusable.length} 个不可用模型</button>` : ""}
       <span class="muted">列表只显示<b>可用</b>的模型；预置厂商在「添加模型」里按需选。</span>
     </div>
-    <table><thead><tr><th>ID</th><th>名称</th><th>类型</th><th>Base URL</th><th>模型</th><th>num_ctx</th><th>内网</th><th>状态</th><th>操作</th></tr></thead><tbody>
-    ${usable.map(m => `<tr><td>${m.id}</td><td>${esc(m.name)}</td><td>${esc(m.provider)}</td>
+
+    <div class="form-row" style="align-items:center">
+      <b>文档解析算力池</b>
+      <span class="muted">勾选的模型参与知识提炼（本地+远端分摊算力）。按<b>文档</b>分派，同一份文档固定用一个模型以保证知识点风格一致。</span>
+    </div>
+    ${pool.mixed_family ? '<div class="err" style="margin-bottom:8px">⚠️ 池内模型族不一致（' + Object.keys(pool.families).join(' / ') + '），不同模型生成的知识点风格会有差异，建议同族模型入池。</div>' : ""}
+    <table><thead><tr><th>ID</th><th>名称</th><th>类型</th><th>Base URL</th><th>模型</th><th>num_ctx</th><th>入池</th><th>权重</th><th>状态</th><th>操作</th></tr></thead><tbody>
+    ${usable.map(m => `<tr>
+      <td>${m.id}</td><td>${esc(m.name)}</td><td>${esc(m.provider)}</td>
       <td class="muted">${esc(m.base_url)}</td><td><code>${esc(m.model_id)}</code></td>
       <td class="muted">${m.num_ctx || "-"}</td>
-      <td>${m.is_local ? "是" : "否"}</td>
-      <td><span class="badge done">可用${m.latency_ms ? " · " + m.latency_ms + "ms" : ""}</span></td>
+      <td><input type="checkbox" ${inPool[m.id] ? "checked" : ""} onchange="togglePool(${m.id}, this.checked)"></td>
+      <td><input type="number" step="0.5" min="0.5" style="width:70px" value="${inPool[m.id] ? inPool[m.id].weight : 1}"
+          onchange="setPoolWeight(${m.id}, this.value)"></td>
+      <td><span class="badge done">可用${m.latency_ms ? " · " + m.latency_ms + "ms" : ""}</span>
+          ${inPool[m.id] ? `<span class="muted"> 运行中 ${inPool[m.id].inflight}/${inPool[m.id].limit}</span>` : ""}</td>
       <td><button class="sm" onclick="testModel(${m.id})">测试</button>
          <button class="sm" onclick="delModel(${m.id})">删除</button></td></tr>`).join("")}
-    ${usable.length ? "" : '<tr><td colspan="9" class="muted">没有可用的模型，点「添加模型」配置一个</td></tr>'}
+    ${usable.length ? "" : '<tr><td colspan="10" class="muted">没有可用的模型，点「添加模型」配置一个</td></tr>'}
     </tbody></table>
+    <p class="muted" style="margin-top:6px">${esc(pool.note || "")}</p>
     ${unusable.length ? `
       <details style="margin-top:10px">
         <summary class="muted" style="cursor:pointer">不可用模型（${unusable.length}）</summary>
@@ -559,6 +573,43 @@ async function adminModels(body) {
         </tbody></table>
       </details>` : ""}`;
 }
+window.togglePool = async (id, on) => {
+  // 必须提交**完整**的成员集合：后端是整体替换语义，
+  // 只发单个 id 会把池子里其它成员踢掉。
+  const members = [];
+  const trs = document.querySelectorAll("#admin-body > table tbody tr");
+  for (const tr of trs) {
+    const tds = tr.children;
+    const cb = tds[6] && tds[6].querySelector("input[type=checkbox]");
+    const wt = tds[7] && tds[7].querySelector("input[type=number]");
+    if (!cb) continue;
+    if (cb.checked) {
+      members.push({ id: Number(tds[0].textContent.trim()),
+                     weight: Number((wt && wt.value) || 1) });
+    }
+  }
+  try {
+    await api("/api/v1/admin/parse-pool", { method: "PUT", body: { members } });
+    toast("算力池已更新（" + members.length + " 个成员）");
+    loadAdmin();
+  } catch (e) { toast("失败: " + e.message); }
+};
+window.setPoolWeight = async (id, w) => {
+  const members = [];
+  const trs = document.querySelectorAll("#admin-body > table tbody tr");
+  for (const tr of trs) {
+    const tds = tr.children;
+    const cb = tds[6] && tds[6].querySelector("input[type=checkbox]");
+    const wt = tds[7] && tds[7].querySelector("input[type=number]");
+    if (!cb || !cb.checked) continue;
+    members.push({ id: Number(tds[0].textContent.trim()),
+                   weight: Number((wt && wt.value) || 1) });
+  }
+  try {
+    await api("/api/v1/admin/parse-pool", { method: "PUT", body: { members } });
+    loadAdmin();
+  } catch (e) { toast("失败: " + e.message); }
+};
 
 window.openAddModel = async () => {
   let presets = state.modelPresets;

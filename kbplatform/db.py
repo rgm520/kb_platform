@@ -114,6 +114,8 @@ CREATE TABLE IF NOT EXISTS models (
   api_key    TEXT,
   is_local   INTEGER DEFAULT 0,
   is_default INTEGER DEFAULT 0,
+  in_parse_pool INTEGER DEFAULT 0,        -- 是否参与文档解析（知识提炼）算力池
+  pool_weight REAL DEFAULT 1,             -- 调度权重
   extra      TEXT,
   created_at REAL
 );
@@ -258,6 +260,13 @@ def init_db(db_path: str) -> sqlite3.Connection:
         conn.executescript(ENGINE_SCHEMA)
     except ImportError:
         pass
+    # 老库补列
+    for ddl in ("ALTER TABLE models ADD COLUMN in_parse_pool INTEGER DEFAULT 0",
+                "ALTER TABLE models ADD COLUMN pool_weight REAL DEFAULT 1"):
+        try:
+            conn.execute(ddl)
+        except sqlite3.OperationalError:
+            pass
     conn.commit()
     return conn
 
