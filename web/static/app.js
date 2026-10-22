@@ -737,6 +737,7 @@ async function adminTokens(body) {
       <label>有效期(天)<input id="tk-ttl" class="inline" type="number" value="90" min="1"></label>
       <button class="primary" onclick="issueToken()">签发密钥</button>
       ${cur ? '<button onclick="clearTokenFilter()">显示全部用户</button>' : ""}
+      <button onclick="openApiGuide()">📖 API 调用手册</button>
     </div>
     <div class="muted" style="margin-bottom:8px">明文只显示一次，请立即交给用户。用户与其密钥是 1:N 关系——同一用户可签发多枚（如不同机器各一枚）。</div>
     <table><thead><tr><th>ID</th><th>用户</th><th>前缀</th><th>备注</th><th>状态</th><th>创建</th><th>最后使用</th><th>过期</th><th>操作</th></tr></thead><tbody>
@@ -751,6 +752,55 @@ async function adminTokens(body) {
     </tbody></table>
     <p class="muted">吊销后密钥立即失效但记录保留；再点「删除」才会从库中彻底移除（已吊销的才可删）。</p>`;
 }
+
+/* ---------------------------------------------------------- API 调用手册 */
+window.openApiGuide = async () => {
+  toast("生成手册中…");
+  let g;
+  try { g = await api("/api/v1/admin/api-guide"); }
+  catch (e) { toast("生成失败: " + e.message); return; }
+  state.apiGuide = g;
+  const ta = `<textarea id="guide-text" style="width:100%;height:340px;background:#1c232c;color:#e6edf3;border:1px solid #2a333d;border-radius:6px;padding:10px;font:12px/1.5 Consolas,monospace">${esc(g.guide)}</textarea>`;
+  const tb = `<textarea id="skill-text" style="width:100%;height:260px;background:#1c232c;color:#e6edf3;border:1px solid #2a333d;border-radius:6px;padding:10px;font:12px/1.5 Consolas,monospace">${esc(g.skill_snippet)}</textarea>`;
+  openModal(`<h3>对外 API 调用手册</h3>
+    <p class="muted">复制下面任意一段，交给 AI 智能体（WorkBuddy 等）即可，它照着就能调用知识库做问答。
+    地址与模型列表从运行配置实时生成，不会过期。</p>
+    <div class="form-row" style="margin:10px 0">
+      <button class="primary" onclick="copyGuide('guide-text')">复制完整手册</button>
+      <button onclick="copyGuide('skill-text')">复制 WorkBuddy 技能片段</button>
+      <button onclick="copyText('${esc(g.base_url + "/api/v1")}')">复制 Base URL</button>
+      <span class="muted">${esc(g.note)}</span>
+    </div>
+    <div class="tabs" style="margin:0 0 8px">
+      <button class="active" onclick="switchGuide('full')">完整手册</button>
+      <button onclick="switchGuide('skill')">WorkBuddy 片段</button>
+    </div>
+    <div id="guide-pane">${ta}</div>
+    <div id="skill-pane" class="hidden">${tb}</div>`);
+};
+window.switchGuide = (which) => {
+  const full = which === "full";
+  $("#guide-pane").classList.toggle("hidden", !full);
+  $("#skill-pane").classList.toggle("hidden", full);
+  $$("#modal-body .tabs button").forEach(b => b.classList.toggle("active",
+    b.textContent.includes(full ? "完整" : "WorkBuddy")));
+};
+window.copyText = async (txt) => {
+  try {
+    await navigator.clipboard.writeText(txt);
+    toast("已复制到剪贴板");
+  } catch (e) {
+    const ta = document.createElement("textarea");
+    ta.value = txt; document.body.appendChild(ta); ta.select();
+    try { document.execCommand("copy"); toast("已复制到剪贴板"); }
+    catch (e2) { toast("复制失败，请手动选中"); }
+    document.body.removeChild(ta);
+  }
+};
+window.copyGuide = (id) => {
+  const el = document.getElementById(id);
+  if (el) copyText(el.value);
+};
 window.issueToken = async () => {
   const uid = Number($("#tk-user").value);
   const label = $("#tk-label").value.trim();

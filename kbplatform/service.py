@@ -268,11 +268,17 @@ def make_app(config_path: str = "D:/opencode/config.toml") -> FastAPI:
         return {"ok": True, "message": "密码已修改"}
 
     @app.get("/api/v1/me")
-    def api_me(request: Request):
-        u = require_user(request)
+    def api_me(ctx=Depends(actor)):
+        """当前身份与可见目录。
+
+        用 actor 而不是 require_user：**token 调用也必须能用**——
+        手册把 /me 列为 token 可用接口，AI 智能体要靠它确认自己的可见范围。
+        """
+        u = ctx["user"]
         return {"user": {"id": u["id"], "username": u["username"], "role": u["role"],
                          "display_name": u["display_name"], "dept": u["dept"]},
-                "scopes": describe_scopes(load_scopes(conn, u["id"]))}
+                "scopes": describe_scopes(load_scopes(conn, u["id"])),
+                "via": ctx.get("via", "session")}
 
     # ============================================================ 问答
     ANSWER_SYSTEM = ("你是企业知识库问答助手。基于给定资料回答问题，"
@@ -423,6 +429,52 @@ def make_app(config_path: str = "D:/opencode/config.toml") -> FastAPI:
         return {"nodes": nodes_out, "edges": uniq}
 
     # ============================================================ 文档
+    @app.get("/api/v1/graph/subgraph")
+    def api_graph_subgraph(node: int, hops: int = 2, types: str = "",
+                           ctx=Depends(actor)):
+        """以某节点为中心取 N 跳子图（节点 + 边），供前端渲染。
+
+        types 逗号分隔，筛选节点类型：entity,knowledge_point,category
+        """
+        u = ctx["user"]
+        pred, params = scope_predicate(u)
+        want = {t.strip() for t in (types or "").split(",") if t.strip()}
+        seen = {int(node)}
+        frontier = [int(node)]
+        edges_out: list[dict] = []
+        for _ in range(max(1, min(hops, 3))):
+            nxt: list[int] = []
+            for nid in frontier:
+                rows = conn.execute(
+                    f"""SELECT e.src, e.dst, e.rel FROM edges e
+                        JOIN chunks ch ON ch.id=e.chunk_id
+                        JOIN catalog c ON c.path=ch.file_path
+                        WHERE (e.src=? OR e.dst=?) AND {pred}""",
+                    [nid, nid] + params).fetchall()
+                for s, d, rel in rows:
+                    edges_out.append({"src": s, "dst": d, "rel": rel})
+                    for x in (s, d):
+                        if x not in seen:
+                            seen.add(x)
+                            nxt.append(x)
+            frontier = nxt
+        nodes_out = []
+        for nid in seen:
+            r = conn.execute("SELECT id,name,type,mentions FROM nodes WHERE id=?",
+                             (nid,)).fetchone()
+            if not r:
+                continue
+            if want and r[2] not in want:
+                continue
+            nodes_out.append({"id": r[0], "name": r[1], "type": r[2], "mentions": r[3]})
+        uniq, seen_e = [], set()
+        for e in edges_out:
+            k = (e["src"], e["dst"], e["rel"])
+            if k not in seen_e:
+                seen_e.add(k)
+                uniq.append(e)
+        return {"nodes": nodes_out, "edges": uniq}
+
     @app.get("/api/v1/documents")
     def api_documents(request: Request, status: Optional[str] = None,
                       share: Optional[str] = None, page: int = 1,
@@ -513,6 +565,40 @@ def make_app(config_path: str = "D:/opencode/config.toml") -> FastAPI:
     def admin_model_presets(ctx=Depends(require_admin)):
         """添加模型对话框里的预置模板（不落库）。"""
         return {"presets": models_mod.PRESETS}
+
+    @app.get("/api/v1/admin/api-guide")
+    def admin_api_guide(request: Request, ctx=Depends(require_admin),
+                       token_id: Optional[int] = None):
+        """对外 API 调用手册（Markdown）。
+
+        token_id 指定时会把该密钥的**明文**替换进示例里，方便管理员直接
+        复制给 AI 智能体；不指定则用占位符。管理台专用。
+        """
+        from kbplatform import api_guide as guide_mod
+        base = (cfg.public_base_url or str(request.base_url)).rstrip("/")
+        # 去掉可能带的 /api/v1 尾巴
+        if base.endswith("/api/v1"):
+            base = base[: -len("/api/v1")]
+        tok = None
+        if token_id:
+            row = conn.execute(
+                "SELECT token_hash FROM api_tokens WHERE id=? AND revoked=0",
+                (token_id,)).fetchone()
+            # 明文不可逆存储，拿不到；用前缀占位并提示
+            if row:
+                tok = row[0][:12] + "...(明文仅签发时显示一次，请手动粘贴)"
+        labels = []
+        for m in models_mod.list_models(conn):
+            st = models_mod.check_usable(m)
+            if st["usable"]:
+                labels.append(f"`{m.name}` (id={m.id}, model_id={m.model_id})")
+        return {
+            "base_url": base,
+            "guide": guide_mod.build_guide(base, tok, labels),
+            "skill_snippet": guide_mod.build_skill_snippet(base + "/api/v1", tok),
+            "note": ("密钥明文只在签发时显示一次，库里只有哈希，无法还原。"
+                     "请从「API 密钥」列表里用你自己的密钥替换占位符。"),
+        }
 
     @app.get("/api/v1/admin/parse-pool")
     def admin_parse_pool(ctx=Depends(require_admin)):

@@ -22,6 +22,7 @@ class Config:
     embed_model: str = "bge-m3"
     embed_dim: int = 1024
     session_secret: str = ""
+    public_base_url: str = ""
 
     def __post_init__(self):
         if not self.db_path:
@@ -56,4 +57,8 @@ def load_config(path: str) -> Config:
         # 会话签名密钥：配置优先，其次环境变量。写死是为了让服务重启后会话不失效。
         session_secret=str(security.get("session_secret")
                            or os.environ.get("KB_SESSION_SECRET", "")),
+        # 对外地址：给 API 手册与其它机器用。本机请求会是 127.0.0.1，
+        # 但手册要发给局域网里的 AI 用，所以单独配。
+        public_base_url=str(security.get("public_base_url", "")
+                            or os.environ.get("KB_PUBLIC_BASE_URL", "")),
     )
