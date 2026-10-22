@@ -39,8 +39,9 @@ def seed(db_path: str = "D:/opencode/kb/data/kb.db",
     conn = init_db(db_path)
     out = {}
 
-    n = models_mod.seed_presets(conn)
+    n = models_mod.seed_local_models(conn)   # 只注册本机确实存在的 Ollama 模型
     out["models_added"] = n
+    out["models_note"] = "云端厂商不预置：没有 API Key 就是不可用的，请在管理台按需添加"
 
     added = 0
     for share, subpath, label in DEFAULT_RESTRICTED:

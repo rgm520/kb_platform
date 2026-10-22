@@ -5,7 +5,8 @@ import pytest
 from kbplatform.db import init_db
 from kbplatform.auth import (create_user, hash_password, issue_token, resolve_token,
                              revoke_token, set_scopes, verify_password, verify_login)
-from kbplatform.models import (PRESETS, add_model, list_models, route_for, seed_presets)
+from kbplatform import models as models_mod
+from kbplatform.models import (PRESETS, add_model, list_models, route_for)
 
 
 # ---------------------------------------------------------------- 密码
@@ -149,22 +150,47 @@ def test_purge_requires_revoked_first(tmp_path):
 
 
 # ---------------------------------------------------------------- 模型
-def test_seed_presets_is_idempotent(tmp_path):
+def test_presets_are_templates_not_seeded_rows(tmp_path):
+    """预置厂商只是「添加模型」对话框里的模板，**不进库**。
+
+    没有 API Key 的云端模型是不可用的，预置进库只是噪音。
+    """
     conn = init_db(str(tmp_path / "kb.db"))
-    n1 = seed_presets(conn)
-    n2 = seed_presets(conn)
-    assert n1 == len(PRESETS)
-    assert n2 == 0
-    assert len(list_models(conn)) == len(PRESETS)
+    before = len(list_models(conn))
+    models_mod.seed_presets(conn)
+    after = len(list_models(conn))
+    assert after == before == 0
+    # 但模板本身仍然同时提供本地与云端选项
+    providers = {p["provider"] for p in models_mod.PRESETS}
+    assert "ollama" in providers and "openai_compatible" in providers
 
 
-def test_presets_include_local_and_cloud(tmp_path):
+def test_presets_cover_common_vendors():
+    names = " ".join(p["name"] for p in models_mod.PRESETS)
+    for v in ("DeepSeek", "通义千问", "腾讯混元", "智谱", "Kimi", "MiniMax", "OpenAI", "Ollama"):
+        assert v in names, f"预置缺少 {v}"
+
+
+def test_check_usable_flags_cloud_model_without_key(tmp_path):
+    """云端模型没配 Key -> 不可用。"""
     conn = init_db(str(tmp_path / "kb.db"))
-    seed_presets(conn)
-    ms = list_models(conn)
-    assert any(m.is_local for m in ms)
-    assert any(not m.is_local for m in ms)
-    assert any(m.model_id == "qwen3.5-9b-64k" for m in ms)
+    mid = models_mod.add_model(conn, "无Key的云端模型", "openai_compatible",
+                              "https://api.example.com/v1", "some-model")
+    m = models_mod.get_model(conn, mid)
+    st = models_mod.check_usable(m)
+    assert st["usable"] is False
+    assert "API Key" in st["reason"]
+
+
+def test_check_usable_flags_unreachable_ollama(tmp_path):
+    """Ollama 主机连不上 -> 不可用。"""
+    conn = init_db(str(tmp_path / "kb.db"))
+    mid = models_mod.add_model(conn, "连不上的Ollama", "ollama",
+                              "http://127.0.0.1:59999", "x")
+    m = models_mod.get_model(conn, mid)
+    st = models_mod.check_usable(m)
+    assert st["usable"] is False
+    assert "不可达" in st["reason"]
 
 
 def test_route_for_switches_cloud_to_local_when_restricted(tmp_path):

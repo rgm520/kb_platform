@@ -277,12 +277,13 @@ async function showNode(id) {
 /* ---------------------------------------------------------- 问答 */
 async function loadModels() {
   try {
-    const r = await api("/api/v1/models");
+    const r = await api("/api/v1/models?only_usable=true");
     state.models = r.models;
     const sel = $("#a-model");
     const cur = sel.value;
-    sel.innerHTML = r.models.map(m =>
-      `<option value="${m.id}">${esc(m.label || m.name)}</option>`).join("");
+    sel.innerHTML = r.models.length
+      ? r.models.map(m => `<option value="${m.id}">${esc(m.label || m.name)}</option>`).join("")
+      : '<option value="">（没有可用模型，请让管理员配置）</option>';
     if (cur) sel.value = cur;
     if (!sel.value) {
       const def = r.models.find(m => m.is_default) || r.models[0];
@@ -524,41 +525,122 @@ window.addRestricted = async () => {
 };
 
 async function adminModels(body) {
-  const r = await api("/api/v1/models");
+  const [r, pr] = await Promise.all([
+    api("/api/v1/models?only_usable=false"),
+    api("/api/v1/admin/models/presets"),
+  ]);
+  const usable = r.models.filter(m => m.usable);
+  const unusable = r.models.filter(m => !m.usable);
+  state.modelPresets = pr.presets;
+
   body.innerHTML = `
     <div class="form-row">
-      <label>名称<input id="nm-name" class="inline"></label>
-      <label>类型<select id="nm-prov" class="inline"><option value="ollama">Ollama(内网自建)</option><option value="openai_compatible">OpenAI 兼容(云端)</option></select></label>
-      <label>Base URL<input id="nm-url" class="inline" value="http://"></label>
-      <label>模型名<input id="nm-mid" class="inline"></label>
-      <label>API Key<input id="nm-key" class="inline" type="password"></label>
-      <label class="chk"><input type="checkbox" id="nm-local">内网自建</label>
-      <label>上下文 num_ctx<input id="nm-ctx" class="inline" type="number" placeholder="远端 Ollama 必填"></label>
-      <button class="primary" onclick="addModel()">添加</button>
+      <button class="primary" onclick="openAddModel()">+ 添加模型</button>
+      ${unusable.length ? `<button onclick="dropUnusable()">清理 ${unusable.length} 个不可用模型</button>` : ""}
+      <span class="muted">列表只显示<b>可用</b>的模型；预置厂商在「添加模型」里按需选。</span>
     </div>
-    <div class="muted" style="margin:-4px 0 10px">
-      <b>num_ctx</b>：Ollama 的 runner 默认只有 4096，<b>超长提示会被静默截断</b>（不报错）。
-      接远端 Ollama 时必须填（建议 32768 或 65536），否则文档问答会悄悄丢掉后半段原文。
-      本机已建好 64k 变体（qwen3.5-9b-64k），用变体名即可，不用填。
-    </div>
-    <table><thead><tr><th>ID</th><th>名称</th><th>类型</th><th>Base URL</th><th>模型</th><th>num_ctx</th><th>内网</th><th>默认</th><th>操作</th></tr></thead><tbody>
-    ${r.models.map(m => `<tr><td>${m.id}</td><td>${esc(m.name)}</td><td>${esc(m.provider)}</td>
+    <table><thead><tr><th>ID</th><th>名称</th><th>类型</th><th>Base URL</th><th>模型</th><th>num_ctx</th><th>内网</th><th>状态</th><th>操作</th></tr></thead><tbody>
+    ${usable.map(m => `<tr><td>${m.id}</td><td>${esc(m.name)}</td><td>${esc(m.provider)}</td>
       <td class="muted">${esc(m.base_url)}</td><td><code>${esc(m.model_id)}</code></td>
       <td class="muted">${m.num_ctx || "-"}</td>
-      <td>${m.is_local ? "是" : "否"}</td><td>${m.is_default ? "★" : ""}</td>
+      <td>${m.is_local ? "是" : "否"}</td>
+      <td><span class="badge done">可用${m.latency_ms ? " · " + m.latency_ms + "ms" : ""}</span></td>
       <td><button class="sm" onclick="testModel(${m.id})">测试</button>
          <button class="sm" onclick="delModel(${m.id})">删除</button></td></tr>`).join("")}
-    </tbody></table>`;
+    ${usable.length ? "" : '<tr><td colspan="9" class="muted">没有可用的模型，点「添加模型」配置一个</td></tr>'}
+    </tbody></table>
+    ${unusable.length ? `
+      <details style="margin-top:10px">
+        <summary class="muted" style="cursor:pointer">不可用模型（${unusable.length}）</summary>
+        <table><thead><tr><th>ID</th><th>名称</th><th>原因</th><th>操作</th></tr></thead><tbody>
+        ${unusable.map(m => `<tr><td>${m.id}</td><td>${esc(m.name)}</td>
+          <td class="err">${esc(m.reason || "不可用")}</td>
+          <td><button class="sm" onclick="delModel(${m.id})">删除</button></td></tr>`).join("")}
+        </tbody></table>
+      </details>` : ""}`;
 }
-window.addModel = async () => {
-  const ctx = $("#nm-ctx").value.trim();
+
+window.openAddModel = async () => {
+  let presets = state.modelPresets;
+  if (!presets) {
+    try { presets = (await api("/api/v1/admin/models/presets")).presets; }
+    catch (e) { toast("加载预置配置失败: " + e.message); return; }
+  }
+  state.modelPresets = presets;
+  openModal(`<h3>添加模型</h3>
+    <div class="form-row" style="margin:10px 0">
+      <label style="min-width:260px">从预置配置选择
+        <select id="am-preset" onchange="applyPreset()">
+          <option value="">— 自定义 —</option>
+          ${presets.map((p, i) => `<option value="${i}">${esc(p.name)}${p.note ? " · " + esc(p.note) : ""}</option>`).join("")}
+        </select>
+      </label>
+    </div>
+    <div id="am-fields" style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <label>名称<input id="am-name"></label>
+      <label>类型<select id="am-prov">
+        <option value="ollama">Ollama(内网自建)</option>
+        <option value="openai_compatible">OpenAI 兼容(云端)</option></select></label>
+      <label>Base URL<input id="am-url" placeholder="http://host:11434"></label>
+      <label>模型名<input id="am-mid" placeholder="qwen3.5:9b"></label>
+      <label>API Key<input id="am-key" type="password" placeholder="云端模型必填"></label>
+      <label>上下文 num_ctx<input id="am-ctx" type="number" placeholder="远端 Ollama 必填，建议 65536"></label>
+      <label class="chk"><input type="checkbox" id="am-local">内网自建（涉密内容可路由到此）</label>
+    </div>
+    <div id="am-note" class="muted" style="margin-top:8px"></div>
+    <div id="am-err" class="err"></div>
+    <div class="modal-foot"><button onclick="closeModal()">取消</button>
+      <button class="primary" onclick="submitAddModel()">添加</button></div>`);
+};
+window.applyPreset = () => {
+  const i = $("#am-preset").value;
+  const note = $("#am-note");
+  if (i === "") { note.textContent = "自定义：所有字段手填。"; return; }
+  const p = state.modelPresets[Number(i)];
+  $("#am-name").value = p.name;
+  $("#am-prov").value = p.provider;
+  $("#am-url").value = p.base_url;
+  $("#am-mid").value = p.model_id;
+  if (p.provider === "ollama") {
+    $("#am-local").checked = true;
+    $("#am-ctx").value = 65536;
+    note.innerHTML = "Ollama 预置：需填 <b>num_ctx</b>（runner 默认 4096 会静默截断长提示）。" +
+      "如果这台机器上建过 <code>qwen3.5-9b-64k</code> 这样的变体，模型名直接用变体名并把 num_ctx 留空。";
+  } else {
+    $("#am-local").checked = false;
+    $("#am-ctx").value = "";
+    note.innerHTML = "云端模型：填 <b>API Key</b> 才能用。涉密目录的内容不会被发往云端（平台会自动改用内网模型）。";
+  }
+};
+window.submitAddModel = async () => {
+  const ctx = $("#am-ctx").value.trim();
+  const body = {
+    name: $("#am-name").value.trim(), provider: $("#am-prov").value,
+    base_url: $("#am-url").value.trim(), model_id: $("#am-mid").value.trim(),
+    api_key: $("#am-key").value || null, is_local: $("#am-local").checked,
+    extra: ctx ? { num_ctx: Number(ctx) } : {},
+  };
+  if (!body.name || !body.base_url || !body.model_id) {
+    $("#am-err").textContent = "名称、Base URL、模型名都要填";
+    return;
+  }
+  if (body.provider === "openai_compatible" && !body.api_key) {
+    $("#am-err").textContent = "云端模型必须填 API Key，否则不可用";
+    return;
+  }
   try {
-    await api("/api/v1/admin/models", { method: "POST", body: {
-      name: $("#nm-name").value.trim(), provider: $("#nm-prov").value,
-      base_url: $("#nm-url").value.trim(), model_id: $("#nm-mid").value.trim(),
-      api_key: $("#nm-key").value || null, is_local: $("#nm-local").checked,
-      extra: ctx ? { num_ctx: Number(ctx) } : {} } });
-    toast("已添加"); loadAdmin(); loadModels();
+    await api("/api/v1/admin/models", { method: "POST", body });
+    closeModal();
+    toast("已添加");
+    loadAdmin(); loadModels();
+  } catch (e) { $("#am-err").textContent = e.message; }
+};
+window.dropUnusable = async () => {
+  if (!confirm("删除所有不可用的模型（没配 Key 的云端模型、连不上的 Ollama）？")) return;
+  try {
+    const r = await api("/api/v1/admin/models/unusable", { method: "DELETE" });
+    toast("已清理 " + r.count + " 个");
+    loadAdmin(); loadModels();
   } catch (e) { toast("失败: " + e.message); }
 };
 window.testModel = async (id) => {

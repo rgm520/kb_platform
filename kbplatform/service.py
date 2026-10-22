@@ -481,9 +481,17 @@ def make_app(config_path: str = "D:/opencode/config.toml") -> FastAPI:
 
     # ============================================================ 模型
     @app.get("/api/v1/models")
-    def api_models(ctx=Depends(actor)):
+    def api_models(ctx=Depends(actor), only_usable: bool = False):
+        """模型列表。
+
+        默认只返回**可用**的模型——没配 API Key 的云端模型、连不上的 Ollama
+        主机都不可用，列出来只是噪音。需要看全部时传 only_usable=false。
+        """
         out = []
         for m in models_mod.list_models(conn):
+            st = models_mod.check_usable(m)
+            if only_usable and not st["usable"]:
+                continue
             if m.provider == "ollama":
                 host = m.base_url.replace("http://", "").replace("https://", "")
                 host = host.split(":")[0]
@@ -496,8 +504,15 @@ def make_app(config_path: str = "D:/opencode/config.toml") -> FastAPI:
                         "model_id": m.model_id,
                         "is_local": m.is_local, "is_default": m.is_default,
                         "has_key": bool(m.api_key),
-                        "num_ctx": (m.extra or {}).get("num_ctx")})
+                        "num_ctx": (m.extra or {}).get("num_ctx"),
+                        "usable": st["usable"], "reason": st.get("reason", ""),
+                        "latency_ms": st.get("latency_ms")})
         return {"models": out}
+
+    @app.get("/api/v1/admin/models/presets")
+    def admin_model_presets(ctx=Depends(require_admin)):
+        """添加模型对话框里的预置模板（不落库）。"""
+        return {"presets": models_mod.PRESETS}
 
     @app.post("/api/v1/admin/models/test")
     def admin_test_model(model_id: int, ctx=Depends(require_admin)):
@@ -526,6 +541,17 @@ def make_app(config_path: str = "D:/opencode/config.toml") -> FastAPI:
                 "truncated": bool((m.extra or {}).get("num_ctx")
                                   and pt < 1000 and len(probe) > 1000),
                 "reply": text[:120]}
+
+    @app.delete("/api/v1/admin/models/unusable")
+    def admin_drop_unusable(ctx=Depends(require_admin)):
+        """一键清掉不可用的模型（没配 Key 的云端模型、连不上的 Ollama）。"""
+        removed = []
+        for m in models_mod.list_models(conn):
+            st = models_mod.check_usable(m)
+            if not st["usable"]:
+                models_mod.delete_model(conn, m.id)
+                removed.append({"id": m.id, "name": m.name, "reason": st.get("reason", "")})
+        return {"removed": removed, "count": len(removed)}
 
     # ============================================================ 智能体
     @app.get("/api/v1/agents")

@@ -17,29 +17,99 @@ from dataclasses import dataclass, field
 import kb.llm as kllm
 
 # ---------------------------------------------------------------- 预置厂商
+# 只作为「添加模型」对话框里的模板，**不预置进库**。
+# 没有 API Key 的云端模型是不可用的，列在模型列表里只是噪音。
 PRESETS = [
-    {"name": "本地 Ollama (qwen3.5-9b-64k)", "provider": "ollama",
-     "base_url": "http://localhost:11434", "model_id": "qwen3.5-9b-64k", "is_local": 1},
-    {"name": "本地 Ollama (qwen3.5-9b-32k)", "provider": "ollama",
-     "base_url": "http://localhost:11434", "model_id": "qwen3.5-9b-32k", "is_local": 1},
     {"name": "DeepSeek", "provider": "openai_compatible",
-     "base_url": "https://api.deepseek.com/v1", "model_id": "deepseek-chat", "is_local": 0},
+     "base_url": "https://api.deepseek.com/v1", "model_id": "deepseek-chat",
+     "need_key": True, "note": "国内直连"},
     {"name": "通义千问 (DashScope)", "provider": "openai_compatible",
      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-     "model_id": "qwen-plus", "is_local": 0},
+     "model_id": "qwen-plus", "need_key": True, "note": "阿里云百炼"},
     {"name": "腾讯混元", "provider": "openai_compatible",
      "base_url": "https://api.hunyuan.cloud.tencent.com/v1",
-     "model_id": "hunyuan-turbo", "is_local": 0},
+     "model_id": "hunyuan-turbo", "need_key": True, "note": "腾讯云"},
     {"name": "智谱 GLM", "provider": "openai_compatible",
      "base_url": "https://open.bigmodel.cn/api/paas/v4",
-     "model_id": "glm-4-plus", "is_local": 0},
+     "model_id": "glm-4-plus", "need_key": True, "note": "bigmodel.cn"},
     {"name": "月之暗面 Kimi", "provider": "openai_compatible",
-     "base_url": "https://api.moonshot.cn/v1", "model_id": "moonshot-v1-8k", "is_local": 0},
+     "base_url": "https://api.moonshot.cn/v1", "model_id": "moonshot-v1-8k",
+     "need_key": True, "note": "Moonshot"},
     {"name": "MiniMax", "provider": "openai_compatible",
-     "base_url": "https://api.minimax.chat/v1", "model_id": "abab6.5s-chat", "is_local": 0},
+     "base_url": "https://api.minimax.chat/v1", "model_id": "abab6.5s-chat",
+     "need_key": True, "note": ""},
     {"name": "OpenAI", "provider": "openai_compatible",
-     "base_url": "https://api.openai.com/v1", "model_id": "gpt-4o-mini", "is_local": 0},
+     "base_url": "https://api.openai.com/v1", "model_id": "gpt-4o-mini",
+     "need_key": True, "note": "需外网"},
+    {"name": "本地 / 内网 Ollama", "provider": "ollama",
+     "base_url": "http://localhost:11434", "model_id": "qwen3.5-9b-64k",
+     "need_key": False, "note": "本机或内网其它机器；需填 num_ctx"},
 ]
+
+# 可用性检查结果缓存（避免每次列表都去打网络）
+_usable_cache: dict[tuple[int, float], dict] = {}
+_USABLE_TTL = 30.0
+
+
+def check_usable(cfg: ModelConfig) -> dict:
+    """判断模型是否真的能用。
+
+    ollama   : 实际 GET <base_url>/api/tags 看主机通不通
+    云端     : 只看有没有配 API Key（不真调，避免花钱/耗配额）
+    """
+    # key 必须包含配置身份，不能只用 id：删掉 id=5 再新建一个 id=5 的模型，
+    # 会拿到上一个模型的旧判定（不同库之间同 id 也会串）。
+    key = (cfg.id, cfg.provider, cfg.base_url, cfg.model_id,
+           int(time.time() // _USABLE_TTL))
+    hit = _usable_cache.get(key)
+    if hit:
+        return hit
+    res = {"usable": True, "reason": ""}
+    if cfg.provider == "ollama":
+        import urllib.request
+        import urllib.error
+        t0 = time.time()
+        try:
+            with urllib.request.urlopen(cfg.base_url.rstrip("/") + "/api/tags", timeout=5) as r:
+                r.read()
+            res["latency_ms"] = int((time.time() - t0) * 1000)
+        except Exception as e:
+            res = {"usable": False,
+                   "reason": f"主机不可达（{type(e).__name__}）", "latency_ms": None}
+    else:
+        if not (cfg.api_key or "").strip():
+            res = {"usable": False, "reason": "未配置 API Key", "latency_ms": None}
+    _usable_cache[key] = res
+    if len(_usable_cache) > 500:
+        _usable_cache.clear()
+    return res
+
+
+def seed_local_models(conn: sqlite3.Connection, base_url: str = "http://localhost:11434",
+                       candidates: list[str] | None = None) -> int:
+    """只注册**本机确实存在**的 Ollama 模型。
+
+    云端厂商不在这里注册——它们没有 API Key 就是不可用的，
+    应该由管理员在「添加模型」时按需选择。
+    """
+    import urllib.request
+    try:
+        with urllib.request.urlopen(base_url.rstrip("/") + "/api/tags", timeout=5) as r:
+            tags = json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return 0
+    have = {m["name"] for m in tags.get("models", [])}
+    cands = candidates or ["qwen3.5-9b-64k", "qwen3.5-9b-32k"]
+    n = 0
+    for mid in cands:
+        if mid not in have:
+            continue
+        if get_model(conn, mid):
+            continue
+        add_model(conn, f"本地 Ollama ({mid})", "ollama", base_url, mid,
+                  is_local=True, is_default=(n == 0))
+        n += 1
+    return n
 
 
 @dataclass
@@ -96,16 +166,11 @@ def delete_model(conn: sqlite3.Connection, model_id: int) -> bool:
 
 
 def seed_presets(conn: sqlite3.Connection) -> int:
-    """把预置厂商写进库（已存在则跳过）。"""
-    n = 0
-    have = {m.model_id for m in list_models(conn)}
-    for i, p in enumerate(PRESETS):
-        if p["model_id"] in have:
-            continue
-        add_model(conn, p["name"], p["provider"], p["base_url"], p["model_id"],
-                  is_local=bool(p["is_local"]), is_default=(i == 0))
-        n += 1
-    return n
+    """已废弃：不再把云端厂商预置进库。
+
+    保留函数名以兼容旧调用，实际行为改为「什么都不做」。
+    """
+    return 0
 
 
 # ---------------------------------------------------------------- 调用
