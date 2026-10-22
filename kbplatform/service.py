@@ -600,6 +600,29 @@ def make_app(config_path: str = "D:/opencode/config.toml") -> FastAPI:
                      "请从「API 密钥」列表里用你自己的密钥替换占位符。"),
         }
 
+    @app.get("/api/v1/admin/skill-package")
+    def admin_skill_package(ctx=Depends(require_admin)):
+        """打包 WorkBuddy 技能包供下载（SKILL.md + scripts + references）。"""
+        import io
+        import zipfile
+        src = os.path.join(os.path.dirname(APP_DIR), "workbuddy-zs-kb")
+        if not os.path.isdir(src):
+            raise HTTPException(404, detail="技能包目录不存在")
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            for dirpath, _dirs, files in os.walk(src):
+                for fn in files:
+                    if fn.endswith((".pyc",)) or "__pycache__" in dirpath:
+                        continue
+                    full = os.path.join(dirpath, fn)
+                    rel = os.path.relpath(full, os.path.dirname(src))
+                    z.write(full, rel.replace("\\", "/"))
+        buf.seek(0)
+        return StreamingResponse(
+            buf, media_type="application/zip",
+            headers={"Content-Disposition":
+                     'attachment; filename="workbuddy-zs-kb.zip"'})
+
     @app.get("/api/v1/admin/parse-pool")
     def admin_parse_pool(ctx=Depends(require_admin)):
         """文档解析算力池状态。"""

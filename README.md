@@ -232,6 +232,23 @@ Ollama 的 runner **默认 num_ctx=4096**，超长提示会被**静默截断**�
 远端 Ollama (192.0.2.77 · qwen3.5:9b)  http://192.0.2.77:11434  权重 1  num_ctx 65536
 `
 
+## 对外 API 与接入
+
+管理台 → API 密钥 → 「📖 API 调用手册」可**复制或下载**给 AI 智能体：
+
+| 按钮 | 产出 |
+|---|---|
+| 复制完整手册 / ⬇ 下载完整手册 (.md) | 5 KB Markdown，含基础信息、核心接口完整请求响应、辅助接口一览、错误码表、给 AI 的 7 条调用规则、curl 与 Python 示例、实时模型列表 |
+| 复制 WorkBuddy 片段 / ⬇ 下载技能片段 (.md) | 580 字符精简版，适合直接塞进智能体 |
+| ⬇ 下载 WorkBuddy 技能包 (.zip) | 完整技能包（SKILL.md + scripts + references），8.5 KB |
+
+手册内容**从运行配置实时生成**（地址取 config.toml 的 public_base_url，
+模型列表取实际可用模型），不会过期。弹窗里可填自己的密钥，
+复制/下载时自动替换 <你的API密钥> 占位符。
+
+GET /api/v1/admin/api-guide 手动取手册；
+GET /api/v1/admin/skill-package 下载技能包 zip。
+
 ## 安全模型
 
 | 概念 | 含义 | 存储 |
