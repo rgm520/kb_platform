@@ -282,7 +282,7 @@ async function loadModels() {
     const sel = $("#a-model");
     const cur = sel.value;
     sel.innerHTML = r.models.map(m =>
-      `<option value="${m.id}">${esc(m.name)}${m.is_local ? " [本地]" : ""}</option>`).join("");
+      `<option value="${m.id}">${esc(m.label || m.name)}</option>`).join("");
     if (cur) sel.value = cur;
     if (!sel.value) {
       const def = r.models.find(m => m.is_default) || r.models[0];
@@ -528,28 +528,51 @@ async function adminModels(body) {
   body.innerHTML = `
     <div class="form-row">
       <label>名称<input id="nm-name" class="inline"></label>
-      <label>类型<select id="nm-prov" class="inline"><option value="ollama">Ollama(本地)</option><option value="openai_compatible">OpenAI 兼容</option></select></label>
-      <label>Base URL<input id="nm-url" class="inline" value="https://"></label>
+      <label>类型<select id="nm-prov" class="inline"><option value="ollama">Ollama(内网自建)</option><option value="openai_compatible">OpenAI 兼容(云端)</option></select></label>
+      <label>Base URL<input id="nm-url" class="inline" value="http://"></label>
       <label>模型名<input id="nm-mid" class="inline"></label>
       <label>API Key<input id="nm-key" class="inline" type="password"></label>
-      <label class="chk"><input type="checkbox" id="nm-local">本地</label>
+      <label class="chk"><input type="checkbox" id="nm-local">内网自建</label>
+      <label>上下文 num_ctx<input id="nm-ctx" class="inline" type="number" placeholder="远端 Ollama 必填"></label>
       <button class="primary" onclick="addModel()">添加</button>
     </div>
-    <table><thead><tr><th>ID</th><th>名称</th><th>类型</th><th>Base URL</th><th>模型</th><th>本地</th><th>默认</th><th></th></tr></thead><tbody>
+    <div class="muted" style="margin:-4px 0 10px">
+      <b>num_ctx</b>：Ollama 的 runner 默认只有 4096，<b>超长提示会被静默截断</b>（不报错）。
+      接远端 Ollama 时必须填（建议 32768 或 65536），否则文档问答会悄悄丢掉后半段原文。
+      本机已建好 64k 变体（qwen3.5-9b-64k），用变体名即可，不用填。
+    </div>
+    <table><thead><tr><th>ID</th><th>名称</th><th>类型</th><th>Base URL</th><th>模型</th><th>num_ctx</th><th>内网</th><th>默认</th><th>操作</th></tr></thead><tbody>
     ${r.models.map(m => `<tr><td>${m.id}</td><td>${esc(m.name)}</td><td>${esc(m.provider)}</td>
       <td class="muted">${esc(m.base_url)}</td><td><code>${esc(m.model_id)}</code></td>
+      <td class="muted">${m.num_ctx || "-"}</td>
       <td>${m.is_local ? "是" : "否"}</td><td>${m.is_default ? "★" : ""}</td>
-      <td><button class="sm" onclick="delModel(${m.id})">删除</button></td></tr>`).join("")}
+      <td><button class="sm" onclick="testModel(${m.id})">测试</button>
+         <button class="sm" onclick="delModel(${m.id})">删除</button></td></tr>`).join("")}
     </tbody></table>`;
 }
 window.addModel = async () => {
+  const ctx = $("#nm-ctx").value.trim();
   try {
     await api("/api/v1/admin/models", { method: "POST", body: {
       name: $("#nm-name").value.trim(), provider: $("#nm-prov").value,
       base_url: $("#nm-url").value.trim(), model_id: $("#nm-mid").value.trim(),
-      api_key: $("#nm-key").value || null, is_local: $("#nm-local").checked } });
+      api_key: $("#nm-key").value || null, is_local: $("#nm-local").checked,
+      extra: ctx ? { num_ctx: Number(ctx) } : {} } });
     toast("已添加"); loadAdmin(); loadModels();
   } catch (e) { toast("失败: " + e.message); }
+};
+window.testModel = async (id) => {
+  toast("测试中…");
+  try {
+    const r = await api("/api/v1/admin/models/test?model_id=" + id, { method: "POST" });
+    openModal(`<h3>模型测试结果</h3>
+      <div class="kv">延迟: ${r.latency_sec}s</div>
+      <div class="kv">实际处理的 prompt token: ${r.prompt_tokens}</div>
+      <div class="kv">输出 token: ${r.output_tokens}</div>
+      <div class="kv">配置的 num_ctx: ${r.num_ctx ?? "(未配置)"}</div>
+      ${r.truncated ? '<div class="err">⚠️ 提示被截断了——请把 num_ctx 调大（远端 Ollama 必填）</div>' : ''}
+      <div class="kv" style="margin-top:8px">回复: ${esc(r.reply)}</div>`);
+  } catch (e) { toast("测试失败: " + e.message); }
 };
 window.delModel = async (id) => {
   try { await api("/api/v1/admin/models/" + id, { method: "DELETE" }); toast("已删除"); loadAdmin(); }

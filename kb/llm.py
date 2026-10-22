@@ -47,9 +47,10 @@ EXTRACTION_SCHEMA = {
 }
 
 
-def _post(path, payload, timeout=1800):
+def _post(path, payload, timeout=1800, base=None):
+    """base 省略时用本机 Ollama；指定 base 则打到那台机器（远端 Ollama 接入用）。"""
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(OLLAMA + path, data=data,
+    req = urllib.request.Request((base or OLLAMA) + path, data=data,
                                  headers={"Content-Type": "application/json; charset=utf-8"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8"))
@@ -131,16 +132,27 @@ def repair_json(s):
 
 
 def chat_json(prompt, schema=None, model=GEN_MODEL, num_predict=2500,
-              temperature=0.2, think=False, retries=2, keep_alive="30m", system=None):
-    """调用大模型并保证拿到合法 JSON。返回 (data, meta)。"""
+              temperature=0.2, think=False, retries=2, keep_alive="30m", system=None,
+              base=None, num_ctx=None):
+    """调用大模型并保证拿到合法 JSON。返回 (data, meta)。
+
+    base    指定远端 Ollama 地址（None=本机）
+    num_ctx 请求级上下文覆盖。**远端 Ollama 的 runner 默认 num_ctx=4096，
+            超长提示会被静默截断**（实测 49500 字符只处理了 2050 token），
+            所以接远端模型必须显式带上这个参数。
+    """
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
 
+    options = {"num_predict": num_predict, "temperature": temperature}
+    if num_ctx:
+        options["num_ctx"] = int(num_ctx)
+
     payload = {
         "model": model, "messages": messages, "stream": False, "think": think,
-        "options": {"num_predict": num_predict, "temperature": temperature},
+        "options": options,
         "keep_alive": keep_alive,
     }
     if schema is not None:
@@ -150,7 +162,7 @@ def chat_json(prompt, schema=None, model=GEN_MODEL, num_predict=2500,
     for attempt in range(retries + 1):
         t0 = time.time()
         try:
-            r = _post("/api/chat", payload)
+            r = _post("/api/chat", payload, base=base)
         except Exception as e:
             last_err = f"HTTP {e}"
             time.sleep(1)

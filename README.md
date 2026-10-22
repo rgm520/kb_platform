@@ -180,6 +180,35 @@ $env:ZB_KB_TOKEN   = "kb_管理员签发的密钥"
 
 详见 `docs/接入说明.md`。
 
+## 模型接入
+
+平台的模型来自 models 表，管理台可增删。两种 provider：
+
+| provider | 说明 | 必填 |
+|---|---|---|
+| ollama | 内网自建 Ollama（可跨主机） | base_url / model_id / **num_ctx** |
+| openai_compatible | 云端 OpenAI 兼容接口 | base_url / model_id / api_key |
+
+### 已接入的 Ollama
+
+| 模型 | 地址 | num_ctx |
+|---|---|---|
+| 本地 qwen3.5-9b-64k | http://localhost:11434 | 变体自带 65536 |
+| 本地 qwen3.5-9b-32k | http://localhost:11434 | 变体自带 32768 |
+| 远端 qwen3.5:9b | http://192.0.2.77:11434 | **65536（请求级覆盖）** |
+
+### ⚠️ 远端 Ollama 的上下文陷阱
+
+Ollama 的 runner **默认 num_ctx=4096**，超长提示会被**静默截断**——不报错、不提示，
+只是悄悄丢掉后面的内容。实测：49500 字符的提示在默认配置下只处理了 2050 token。
+
+远端机器往往无法 SSH（本例 22 端口关闭），建不了 qwen3.5-9b-64k 这样的变体，
+**唯一可靠的办法是请求级覆盖** options.num_ctx——Ollama 支持按请求指定，
+并会写回驻留 runner。平台已按此实现，配置在模型 extra.num_ctx。
+
+管理台的「模型配置 → 测试」按钮会回显**实际处理的 prompt token 数**，
+一眼就能看出有没有被截断。
+
 ## 安全模型
 
 | 概念 | 含义 | 存储 |

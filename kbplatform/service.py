@@ -482,10 +482,50 @@ def make_app(config_path: str = "D:/opencode/config.toml") -> FastAPI:
     # ============================================================ 模型
     @app.get("/api/v1/models")
     def api_models(ctx=Depends(actor)):
-        return {"models": [{"id": m.id, "name": m.name, "provider": m.provider,
-                            "base_url": m.base_url, "model_id": m.model_id,
-                            "is_local": m.is_local, "is_default": m.is_default,
-                            "has_key": bool(m.api_key)} for m in models_mod.list_models(conn)]}
+        out = []
+        for m in models_mod.list_models(conn):
+            if m.provider == "ollama":
+                host = m.base_url.replace("http://", "").replace("https://", "")
+                host = host.split(":")[0]
+                tag = "[本机]" if host in ("localhost", "127.0.0.1") else f"[{host}]"
+            else:
+                tag = "[云端]"
+            out.append({"id": m.id, "name": m.name,
+                        "label": f"{m.name} {tag}",
+                        "provider": m.provider, "base_url": m.base_url,
+                        "model_id": m.model_id,
+                        "is_local": m.is_local, "is_default": m.is_default,
+                        "has_key": bool(m.api_key),
+                        "num_ctx": (m.extra or {}).get("num_ctx")})
+        return {"models": out}
+
+    @app.post("/api/v1/admin/models/test")
+    def admin_test_model(model_id: int, ctx=Depends(require_admin)):
+        """测试模型连通性与上下文配置。
+
+        远端 Ollama 最容易踩的坑是 runner 默认 num_ctx=4096 导致长提示被
+        **静默截断**——这里用一段较长���提示回显实际处理的 token 数，
+        让管理员一眼看出有没有被截。
+        """
+        m = models_mod.get_model(conn, model_id)
+        if m is None:
+            raise HTTPException(404, detail="模型不存在")
+        probe = "这是一段用于验证上下文长度的中文提示。" * 400   # 约 1600 token
+        t0 = time.time()
+        try:
+            text, usage = models_mod.chat(m, probe + "\n请只回复两个字：好",
+                                         system="你是测试助手。",
+                                         temperature=0.1, max_tokens=16)
+        except Exception as e:
+            raise HTTPException(502, detail=f"调用失败: {type(e).__name__}: {e}")
+        dt = round(time.time() - t0, 2)
+        pt = usage.get("prompt_tokens", 0)
+        return {"ok": True, "latency_sec": dt, "prompt_tokens": pt,
+                "output_tokens": usage.get("output_tokens", 0),
+                "num_ctx": (m.extra or {}).get("num_ctx"),
+                "truncated": bool((m.extra or {}).get("num_ctx")
+                                  and pt < 1000 and len(probe) > 1000),
+                "reply": text[:120]}
 
     # ============================================================ 智能体
     @app.get("/api/v1/agents")

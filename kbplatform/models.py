@@ -137,16 +137,28 @@ def _chat_openai_compatible(cfg: ModelConfig, prompt: str, system: str | None,
 
 def _chat_ollama(cfg: ModelConfig, prompt: str, system: str | None,
                  temperature: float, max_tokens: int) -> tuple[str, dict]:
-    messages = ([{"role": "system", "content": system}] if system else []) + \
-               [{"role": "user", "content": prompt}]
+    """Ollama provider。
+
+    base_url 指向哪台机器就打哪台（远端 Ollama 接入靠这个）。
+
+    **num_ctx 必须显式带上**：Ollama 的 runner 默认 num_ctx=4096，
+    超长提示会被**静默截断**（不报错、不提示，只是丢掉后面的内容）。
+    实测 49500 字符的提示在默认配置下只处理了 2050 token。
+    远端机器无法 SSH 建 64k 变体时，请求级 num_ctx 覆盖是唯一可靠办法。
+    """
+    options = {"temperature": temperature, "num_predict": max_tokens}
+    num_ctx = (cfg.extra or {}).get("num_ctx")
+    if num_ctx:
+        options["num_ctx"] = int(num_ctx)
     r = kllm._post("/api/chat", {
         "model": cfg.model_id,
-        "messages": messages,
+        "messages": ([{"role": "system", "content": system}] if system else []) +
+                    [{"role": "user", "content": prompt}],
         "stream": False,
         "think": False,
-        "options": {"temperature": temperature, "num_predict": max_tokens},
-        "keep_alive": "30m",
-    })
+        "options": options,
+        "keep_alive": (cfg.extra or {}).get("keep_alive", "30m"),
+    }, base=cfg.base_url)
     text = (r.get("message") or {}).get("content") or ""
     return text, {"prompt_tokens": r.get("prompt_eval_count", 0),
                   "output_tokens": r.get("eval_count", 0)}
