@@ -54,6 +54,56 @@ powershell -NoProfile -ExecutionPolicy Bypass -File D:\opencode\tools\restart-se
   - 未吊销的密钥直接删会被拒（400），避免"点一下就永久消失"而管理员没意识到该 token 还在被某个智能体使用
 - 支持过期时间（默认 90 天）、最后使用时间
 
+## 部署与自愈
+
+平台由**监督进程**托管，并注册了两个 Windows 计划任务：
+
+| 任务 | 作用 |
+|---|---|
+| OpenCode-KB-Platform | 登录时启动，**动作就是监督进程本身**（前台常驻） |
+| OpenCode-KB-Watchdog | 每 1 分钟检查一次，异常则重新拉起平台任务 |
+
+`
+计划任务 OpenCode-KB-Platform
+  └─ 监督进程 kbplatform.supervisor          (心跳写 supervisor-heartbeat.json)
+       ├── uvicorn kbplatform.service:app    (Web 服务，:8000)
+       └── kbplatform.pipeline               (摄入流水线)
+`
+
+**为什么不用 Start-Process 直接起**：那样起的进程与调用它的 shell 在同一个
+job object 里，shell 一被回收（会话结束 / 终端关闭 / 命令超时被杀），服务会被
+**连带杀掉且日志里没有任何异常**——这是实际踩过的坑。计划任务由 Task Scheduler
+托管，不受交互 shell 生命周期影响。
+
+**自愈能力**（均已实测）：
+
+| 故障 | 恢复 |
+|---|---|
+| Web 服务子进程被杀 | 监督进程 ~10 秒内重启 |
+| 摄入流水线被杀 | 监督进程 ~25 秒内重启 |
+| Web 服务健康检查连续失败 3 次 | 监督进程重启它 |
+| 全部进程被杀 | 看门狗 ~30 秒内恢复（其中约 16 秒不可达） |
+| 监督进程被杀 | 看门狗检测到心跳过期后重新拉起 |
+
+运维命令：
+
+`powershell
+# 注册/启动（首次部署或改配置后）
+powershell -NoProfile -ExecutionPolicy Bypass -File D:\opencode\tools\install-task.ps1
+
+# 手动启停
+powershell -NoProfile -ExecutionPolicy Bypass -File D:\opencode\tools\start-platform.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File D:\opencode\tools\start-platform.ps1 -Stop
+
+# 看状态
+Get-ScheduledTask | Where-Object TaskName -like 'OpenCode-KB*' | Get-ScheduledTaskInfo
+Get-Content D:\opencode\kb\logs\supervisor-heartbeat.json    # 心跳与重启次数
+Get-Content D:\opencode\kb\logs\watchdog.log -Tail 20          # 看门狗记录
+`
+
+> ⚠️ Task Scheduler 自带的「失败后重启」对**外部强杀**不生效（实测
+> LastTaskResult=0xFFFFFFFF 但任务直接转 Ready 不会重启），所以用周期看门狗兜底。
+
 ## 目录结构
 
 ```

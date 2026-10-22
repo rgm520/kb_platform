@@ -625,6 +625,19 @@ def make_app(config_path: str = "D:/opencode/config.toml") -> FastAPI:
             " ORDER BY a.id DESC LIMIT ?", (limit,)).fetchall()
         return {"audit": [dict(r) for r in rows]}
 
+    # ============================================================ 健康检查
+    @app.get("/health")
+    def health():
+        """存活探针。监督进程用它判断服务是否需要拉起。"""
+        try:
+            n_files = conn.execute("SELECT COUNT(*) FROM catalog").fetchone()[0]
+            n_chunks = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+            n_nodes = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+            return {"status": "ok", "files": n_files, "chunks": n_chunks, "nodes": n_nodes}
+        except Exception as e:
+            return JSONResponse(status_code=503,
+                                content={"status": "error", "error": str(e)[:200]})
+
     # ============================================================ 静态页面
     if os.path.isdir(WEB_DIR):
         app.mount("/static", StaticFiles(directory=os.path.join(WEB_DIR, "static")),

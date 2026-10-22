@@ -20,6 +20,7 @@ class Config:
     llm_model: str = "qwen3.5-9b-64k"
     embed_model: str = "bge-m3"
     embed_dim: int = 1024
+    session_secret: str = ""
 
     def __post_init__(self):
         if not self.db_path:
@@ -37,6 +38,7 @@ def load_config(path: str) -> Config:
     paths = raw.get("paths", {})
     runtime = raw.get("runtime", {})
     models = raw.get("models", {})
+    security = raw.get("security", {})
     drives = {k.upper(): v for k, v in raw.get("drives", {}).items()}
     return Config(
         monitor_roots=list(mon.get("roots", [])),
@@ -48,4 +50,7 @@ def load_config(path: str) -> Config:
         llm_model=str(models.get("llm", "qwen3.5-9b-64k")),
         embed_model=str(models.get("embed", "bge-m3")),
         embed_dim=int(models.get("embed_dim", 1024)),
+        # 会话签名密钥：配置优先，其次环境变量。写死是为了让服务重启后会话不失效。
+        session_secret=str(security.get("session_secret")
+                           or os.environ.get("KB_SESSION_SECRET", "")),
     )
