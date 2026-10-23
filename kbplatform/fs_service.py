@@ -5,6 +5,7 @@ import hashlib
 import mimetypes
 import os
 import shutil
+import sqlite3
 import time
 import uuid
 from urllib.parse import quote
@@ -17,10 +18,11 @@ from kbplatform.catalog import PARSEABLE_EXT, FileRecord
 from kbplatform.config import Config
 from kbplatform.db import upsert_catalog
 from kbplatform.fsindex import rel_key
-from kbplatform.grants import can_read, can_write, filter_entries, user_grants
+from kbplatform.grants import (can_read, can_write, filter_entries,
+                               migrate_user_scopes, set_grants, user_grants)
 from kbplatform.paths import split_share
-from kbplatform.storage import (Entry, adapter_for, is_safe_rel, normalize_rel,
-                                source_from_row)
+from kbplatform.storage import (Entry, Source, adapter_for, is_safe_rel, normalize_rel,
+                                source_from_row, test_connection)
 
 
 def _is_admin(user) -> bool:
@@ -171,6 +173,17 @@ def cleanup_uploads(cfg: Config, conn, max_age_sec: int = 86400) -> int:
         n += 1
     conn.commit()
     return n
+
+
+def _source_admin_dict(r) -> dict:
+    return {
+        "id": int(r["id"]), "name": r["name"], "kind": r["kind"], "root": r["root"],
+        "username": r["username"] or "", "domain": r["domain"] or "",
+        "writable": bool(r["writable"]), "personal_root": r["personal_root"] or "",
+        "enabled": bool(r["enabled"]), "has_password": bool(r["secret_enc"]),
+        "scan_state": r["scan_state"], "scan_error": r["scan_error"],
+        "last_scan_at": r["last_scan_at"],
+    }
 
 
 def register_fs_routes(app, cfg: Config, conn, require_user, require_admin, audit):
@@ -563,3 +576,197 @@ def register_fs_routes(app, cfg: Config, conn, require_user, require_admin, audi
         audit(user["id"], None, "purge", question=f"{source.name}:{t['original_rel']}",
               hit_paths=[t["original_rel"]], ip=None)
         return {"purged": True}
+
+    # ------------------------------------------------------------ 管理台：存储源
+    def _source_any(sid: int):
+        row = conn.execute("SELECT * FROM storage_sources WHERE id=?", (int(sid),)).fetchone()
+        if row is None:
+            raise HTTPException(404, detail="存储源不存在")
+        return row
+
+    @app.get("/api/v1/admin/sources")
+    def admin_sources(user=Depends(require_admin)):
+        rows = conn.execute("SELECT * FROM storage_sources ORDER BY id").fetchall()
+        return {"sources": [_source_admin_dict(r) for r in rows]}
+
+    @app.post("/api/v1/admin/sources")
+    def admin_source_create(payload: dict = Body(...), user=Depends(require_admin)):
+        name = str(payload.get("name", "")).strip()
+        kind = str(payload.get("kind", "")).strip().lower()
+        root = str(payload.get("root", "")).strip()
+        if not name or kind not in ("local", "smb") or not root:
+            raise HTTPException(400, detail="name/kind/root 必填")
+        if kind == "local" and not os.path.isdir(root):
+            raise HTTPException(400, detail="本地根目录不存在")
+        personal = normalize_rel(payload.get("personal_root", ""))
+        if not is_safe_rel(personal) or personal == ".":
+            raise HTTPException(400, detail="个人空间目录不合法")
+        password = payload.get("password") or ""
+        secret_enc = auth.encrypt_secret(str(password)) if password else None
+        now = time.time()
+        try:
+            cur = conn.execute(
+                "INSERT INTO storage_sources(name,kind,root,username,secret_enc,domain,"
+                "writable,personal_root,enabled,scan_state,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,'idle',?)",
+                (name, kind, root, payload.get("username") or None, secret_enc,
+                 payload.get("domain") or None, 1 if payload.get("writable") else 0,
+                 personal, 1 if payload.get("enabled", True) else 0, now))
+            conn.commit()
+        except sqlite3.IntegrityError:
+            raise HTTPException(409, detail="存储源名称已存在")
+        migrate_user_scopes(conn, cfg)
+        row = _source_any(int(cur.lastrowid))
+        audit(user["id"], None, "source_create", question=name, ip=None)
+        return _source_admin_dict(row)
+
+    @app.put("/api/v1/admin/sources/{source_id}")
+    def admin_source_update(source_id: int, payload: dict = Body(...),
+                            user=Depends(require_admin)):
+        row = _source_any(source_id)
+        name = str(payload.get("name", row["name"])).strip()
+        kind = str(payload.get("kind", row["kind"])).strip().lower()
+        root = str(payload.get("root", row["root"])).strip()
+        if not name or kind not in ("local", "smb") or not root:
+            raise HTTPException(400, detail="name/kind/root 必填")
+        if kind == "local" and not os.path.isdir(root):
+            raise HTTPException(400, detail="本地根目录不存在")
+        personal = normalize_rel(payload.get("personal_root", row["personal_root"] or ""))
+        if not is_safe_rel(personal) or personal == ".":
+            raise HTTPException(400, detail="个人空间目录不合法")
+        secret_enc = row["secret_enc"]
+        if payload.get("password"):
+            secret_enc = auth.encrypt_secret(str(payload["password"]))
+        try:
+            conn.execute(
+                "UPDATE storage_sources SET name=?,kind=?,root=?,username=?,secret_enc=?,"
+                "domain=?,writable=?,personal_root=?,enabled=? WHERE id=?",
+                (name, kind, root, payload.get("username", row["username"]) or None,
+                 secret_enc, payload.get("domain", row["domain"]) or None,
+                 1 if payload.get("writable", bool(row["writable"])) else 0,
+                 personal, 1 if payload.get("enabled", bool(row["enabled"])) else 0,
+                 int(source_id)))
+            conn.commit()
+        except sqlite3.IntegrityError:
+            raise HTTPException(409, detail="存储源名称已存在")
+        audit(user["id"], None, "source_update", question=name, ip=None)
+        return _source_admin_dict(_source_any(source_id))
+
+    @app.delete("/api/v1/admin/sources/{source_id}")
+    def admin_source_delete(source_id: int, force: int = 0, user=Depends(require_admin)):
+        row = _source_any(source_id)
+        sid = int(source_id)
+        n_grants = conn.execute("SELECT COUNT(*) FROM grants WHERE source_id=?",
+                                (sid,)).fetchone()[0]
+        n_trash = conn.execute("SELECT COUNT(*) FROM trash_entries WHERE source_id=?",
+                               (sid,)).fetchone()[0]
+        if (n_grants or n_trash) and not force:
+            raise HTTPException(409, detail=("存储源仍有授权或回收站条目，"
+                                            "确认后加 ?force=1 删除"))
+        prefix = str(row["root"]).rstrip("\\") + "\\"
+        cats = conn.execute("SELECT id,path FROM catalog WHERE path LIKE ?",
+                            (prefix + "%",)).fetchall()
+        for c in cats:
+            indexer.clear_artifacts(conn, cfg.fts_path, app.state.scanner.vs, c["path"])
+            conn.execute("DELETE FROM jobs WHERE catalog_id=?", (c["id"],))
+            conn.execute("DELETE FROM catalog WHERE id=?", (c["id"],))
+        conn.execute("DELETE FROM grants WHERE source_id=?", (sid,))
+        conn.execute("DELETE FROM trash_entries WHERE source_id=?", (sid,))
+        conn.execute("DELETE FROM upload_sessions WHERE source_id=?", (sid,))
+        conn.execute("DELETE FROM fs_entries WHERE source_id=?", (sid,))
+        conn.execute("DELETE FROM storage_sources WHERE id=?", (sid,))
+        conn.commit()
+        audit(user["id"], None, "source_delete", question=row["name"], ip=None)
+        return {"deleted": True}
+
+    @app.post("/api/v1/admin/sources/{source_id}/test")
+    def admin_source_test(source_id: int, payload: dict | None = Body(default=None),
+                          user=Depends(require_admin)):
+        payload = payload or {}
+        if int(source_id) == 0:
+            if not payload.get("root") or not payload.get("kind"):
+                raise HTTPException(400, detail="未保存的源需要提供 kind/root")
+            row = None
+        else:
+            row = _source_any(source_id)
+        kind = str(payload.get("kind") or (row["kind"] if row else "")).lower()
+        root = str(payload.get("root") or (row["root"] if row else ""))
+        username = payload.get("username", row["username"] if row else None)
+        domain = payload.get("domain", row["domain"] if row else None)
+        if payload.get("password"):
+            password = str(payload["password"])
+        else:
+            password = auth.decrypt_secret(row["secret_enc"]) if row and row["secret_enc"] else None
+        source = Source(id=int(source_id), name=(row["name"] if row else "test"),
+                        kind=kind, root=root, username=username, domain=domain,
+                        writable=bool(row["writable"]) if row else False,
+                        personal_root=(row["personal_root"] if row else "") or "",
+                        enabled=True)
+        result = test_connection(source, password)
+        audit(user["id"], None, "source_test", question=root,
+              hit_paths=[root] if result.get("ok") else [], ip=None)
+        return result
+
+    @app.post("/api/v1/admin/sources/{source_id}/scan")
+    def admin_source_scan(source_id: int, user=Depends(require_admin)):
+        _source_any(source_id)
+        app.state.scanner.trigger(int(source_id))
+        return {"queued": True}
+
+    @app.get("/api/v1/admin/sources/{source_id}/scan/status")
+    def admin_source_scan_status(source_id: int, user=Depends(require_admin)):
+        _source_any(source_id)
+        st = app.state.scanner.status(int(source_id))
+        if st is None:
+            raise HTTPException(404, detail="存储源不存在")
+        return st
+
+    @app.get("/api/v1/admin/sources/{source_id}/tree")
+    def admin_source_tree(source_id: int, rel: str = "", user=Depends(require_admin)):
+        rel = normalize_rel(rel)
+        if not is_safe_rel(rel):
+            raise HTTPException(400, detail="非法路径")
+        row = _source_any(source_id)
+        _, adapter = _adapter(conn, row)
+        try:
+            entries = adapter.listdir(rel)
+        except Exception as e:
+            raise HTTPException(502, detail=f"目录不可读: {e}")
+        dirs = [{"rel": e.rel, "name": e.name} for e in entries if e.is_dir]
+        dirs.sort(key=lambda x: x["name"].lower())
+        return {"rel": rel, "dirs": dirs}
+
+    # ------------------------------------------------------------ 管理台：授权
+    @app.get("/api/v1/admin/users/{user_id}/grants")
+    def admin_user_grants(user_id: int, user=Depends(require_admin)):
+        if conn.execute("SELECT 1 FROM users WHERE id=?", (int(user_id),)).fetchone() is None:
+            raise HTTPException(404, detail="用户不存在")
+        rows = conn.execute(
+            "SELECT source_id,subpath,can_write FROM grants WHERE user_id=? "
+            "ORDER BY source_id,subpath", (int(user_id),)).fetchall()
+        return {"grants": [{"source_id": r["source_id"], "subpath": r["subpath"],
+                            "can_write": bool(r["can_write"])} for r in rows]}
+
+    @app.put("/api/v1/admin/users/{user_id}/grants")
+    def admin_set_user_grants(user_id: int, payload: dict = Body(...),
+                              user=Depends(require_admin)):
+        if conn.execute("SELECT 1 FROM users WHERE id=?", (int(user_id),)).fetchone() is None:
+            raise HTTPException(404, detail="用户不存在")
+        items = payload.get("grants")
+        if not isinstance(items, list):
+            raise HTTPException(400, detail="grants 必须是数组")
+        clean = []
+        for it in items:
+            try:
+                clean.append({"source_id": int(it["source_id"]),
+                              "subpath": str(it.get("subpath", "")),
+                              "can_write": bool(it.get("can_write"))})
+            except Exception:
+                raise HTTPException(400, detail="授权项不合法")
+        try:
+            set_grants(conn, int(user_id), clean)
+        except ValueError as e:
+            raise HTTPException(400, detail=str(e))
+        audit(user["id"], None, "grants_set", question=f"user={user_id} n={len(clean)}",
+              ip=None)
+        return {"grants": clean}
