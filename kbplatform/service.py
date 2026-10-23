@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 
 from kbplatform import auth, models as models_mod
 from kbplatform.config import Config, load_config
-from kbplatform.db import init_db, ThreadLocalConn
+from kbplatform.db import init_db, ThreadLocalConn, write_with_retry
 from kbplatform.retrieval import Retriever
 from kbplatform.scopes import (load_restricted, load_scopes, describe_scopes,
                                is_restricted)
@@ -44,9 +44,9 @@ _AUTH_FAIL_HINT = {
                "完整密钥约 35 位，形如 kb_xxxxxxxxxxxxxxxxxxxxxxxxxxxxx。"
                "请让知识库管理员把完整密钥发给你，不要用前缀重试。"),
     "revoked": ("该密钥已被管理员吊销，不能再使用。"
-                "如果你手上有更新的一枚密钥，请改用最新的那枚——"
-                "不要复用历史对话/旧配置里出现过的密钥；"
-                "确实没有的话，请让管理员重新签发一枚并把完整密钥（约 35 位）发给你。"),
+                "请改用最新的一枚：如果管理员已在本机或配置里为你放好了密钥文件，"
+                "直接读取它，不要复用历史对话/旧配置里的旧密钥；"
+                "确实找不到时，才联系管理员重新签发（完整密钥约 35 位）。"),
     "expired": ("该密钥已过期，不能再使用。"
                 "请让管理员重新签发一枚，并把完整密钥（约 35 位）发给你。"),
     "unknown": ("密钥无效：平台里没有这枚密钥。"
@@ -273,13 +273,17 @@ def make_app(config_path: str = "D:/opencode/config.toml") -> FastAPI:
 
     def audit(user_id, token_prefix, action, question=None, hit_paths=None,
               model_used=None, restricted=False, ip=None):
-        conn.execute(
+        # 审计是旁路：并发入库时数据库可能被写锁占住几十秒。
+        # 重试仍失败就丢弃并记一行日志，绝不能把登录/查库变成 500。
+        ok = write_with_retry(
+            conn,
             "INSERT INTO audit_log(user_id, token_prefix, action, question, hit_paths,"
             " model_used, restricted, ip, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
             (user_id, token_prefix, action, question,
              json.dumps(hit_paths or [], ensure_ascii=False), model_used,
              1 if restricted else 0, ip, time.time()))
-        conn.commit()
+        if not ok:
+            print(f"[audit] 数据库繁忙，丢弃一条审计记录 action={action}", flush=True)
 
     # ------------------------------------------------------------ 模型
     def pick_model(conn_, model_ref, user_id):

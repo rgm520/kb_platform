@@ -27,6 +27,8 @@ import secrets
 import sqlite3
 import time
 
+from kbplatform.db import write_with_retry
+
 TOKEN_PREFIX = "kb_"
 TOKEN_BYTES = 24
 DEFAULT_TOKEN_TTL_DAYS = 90
@@ -225,8 +227,10 @@ def resolve_token(conn: sqlite3.Connection, token: str) -> sqlite3.Row | None:
         return None
     if row["expires_at"] and row["expires_at"] < time.time():
         return None
-    conn.execute("UPDATE api_tokens SET last_used_at=? WHERE id=?", (time.time(), row["id"]))
-    conn.commit()
+    # last_used_at 只是展示用的旁路信息：入库时写锁可能被占住，
+    # 记不上也不能让一次正常的鉴权变成 500。
+    write_with_retry(conn, "UPDATE api_tokens SET last_used_at=? WHERE id=?",
+                     (time.time(), row["id"]))
     return row
 
 

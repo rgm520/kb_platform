@@ -222,6 +222,38 @@ def connect(db_path: str) -> sqlite3.Connection:
     return conn
 
 
+def write_with_retry(conn, sql: str, params=(), attempts: int = 6,
+                     base_delay: float = 0.1) -> bool:
+    """执行一条写入；遇到锁冲突就回滚重试，返回是否成功。
+
+    为什么需要它：
+        WAL 让读写可以并行，但**写锁全局只有一个**。入库流水线如果在
+        事务里调 LLM，写锁会被攥住几十秒，Web 端同一时刻的审计/登录
+        写入等不到就会抛 `database is locked`，把正常请求变成 500。
+        这类写入（审计、last_used_at）都是旁路，重试几次仍失败也不该
+        拖垮业务请求，所以调用方拿到 False 只记日志、不抛异常。
+    """
+    last: Exception | None = None
+    for i in range(max(1, attempts)):
+        try:
+            conn.execute(sql, params)
+            conn.commit()
+            return True
+        except sqlite3.OperationalError as exc:
+            msg = str(exc).lower()
+            if "locked" not in msg and "busy" not in msg:
+                raise
+            last = exc
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            time.sleep(base_delay * (i + 1))
+    if last is not None:
+        print(f"[db] 写入重试 {attempts} 次仍失败：{last}", flush=True)
+    return False
+
+
 class ThreadLocalConn:
     """按线程复用的 sqlite 连接代理（接口与 sqlite3.Connection 兼容）。
 

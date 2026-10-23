@@ -105,6 +105,10 @@ def extract_file(conn, catalog_id: int, unc_path: str, chunk_ids: list[int],
             pgraph.build_from_extraction(Store.from_conn(conn), unc_path, cid, obj)
             n_kp += len(obj.get("key_points", []))
             n_rel += len(obj.get("relations", []))
+            # 立刻提交：下一次循环要调 LLM（可能几十秒），
+            # 事务一直开着会把写锁攥住，Web 端的审计/登录
+            # 等不到锁就会报 "database is locked"。
+            conn.commit()
     finally:
         if member is not None and pool is not None:
             pool.release(member)
