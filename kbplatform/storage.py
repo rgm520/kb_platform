@@ -92,6 +92,11 @@ def _join_rel(base: str, name: str) -> str:
     return f"{base}\\{name}" if base else name
 
 
+def _skip_name(name: str) -> bool:
+    # ~$ 是 Office 打开文件时留下的锁文件，不是用户文件
+    return name.startswith(".") or name.startswith("~$") or name in SKIP_NAMES
+
+
 class LocalAdapter:
     def __init__(self, root: str):
         self.root = os.path.abspath(root)
@@ -113,7 +118,7 @@ class LocalAdapter:
         out: list[Entry] = []
         with os.scandir(path) as it:
             for e in it:
-                if e.name.startswith(".") or e.name in SKIP_NAMES:
+                if _skip_name(e.name):
                     continue
                 try:
                     is_dir = e.is_dir(follow_symlinks=False)
@@ -204,7 +209,7 @@ class SmbAdapter:
         out: list[Entry] = []
         try:
             for e in it:
-                if e.name.startswith(".") or e.name in SKIP_NAMES:
+                if _skip_name(e.name):
                     continue
                 try:
                     is_dir = e.is_dir()
