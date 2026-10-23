@@ -28,6 +28,17 @@ def test_pipeline_processes_new_file_end_to_end(tmp_path, monkeypatch):
     assert stats["failed"] == 0
 
 
+def test_pipeline_requeues_stale_running_jobs_on_startup(tmp_path):
+    """重启后，上次领了没做完的任务必须放回队列，否则那些文档永远不再处理。"""
+    p = Pipeline(_cfg(tmp_path))
+    p.conn.execute("INSERT INTO jobs(kind,catalog_id,state,created_at,attempts) "
+                   "VALUES ('index', NULL, 'running', 0, 1)")
+    p.conn.commit()
+
+    p2 = Pipeline(_cfg(tmp_path))
+    assert p2.conn.execute("SELECT state FROM jobs").fetchone()[0] == "queued"
+
+
 def test_pipeline_marks_catalog_done_with_tier_flags(tmp_path, monkeypatch):
     import kb.llm as llm
     (tmp_path / "a.md").write_text("信创资源池由总部统一规划建设。\n" * 100, encoding="utf-8")

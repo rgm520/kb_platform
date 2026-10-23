@@ -21,6 +21,11 @@ class Pipeline:
         self.conn = init_db(config.db_path)
         self.vs = VectorStore(config.vector_dir, dim=config.embed_dim)
         self.queue = JobQueue(self.conn)
+        # 进程崩溃 / 被重启时，上一轮领到一半的任务会永远停在 running，
+        # 没人回收就再也不会被处理。启动时先把它们放回队列。
+        stale = self.queue.requeue_stale()
+        if stale:
+            print(f"[pipeline] 启动回收 {stale} 个卡在 running 的任务", flush=True)
         self.monitor = Monitor(self.conn, config.monitor_roots, config.drive_map,
                                qps=config.scan_qps,
                                poll_interval=config.poll_interval_sec)
