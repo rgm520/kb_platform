@@ -80,6 +80,89 @@ CREATE TABLE IF NOT EXISTS dir_scopes (
   UNIQUE(share, subpath)
 );
 
+-- ---------------------------------------------------------------- 2.0 文件底座
+-- 存储源：一个存储源 = 一个共享根；SMB 共享各自的账号密码
+CREATE TABLE IF NOT EXISTS storage_sources (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  name          TEXT UNIQUE NOT NULL,
+  kind          TEXT NOT NULL,                -- local | smb
+  root          TEXT NOT NULL,
+  username      TEXT,
+  secret_enc    TEXT,
+  domain        TEXT,
+  writable      INTEGER DEFAULT 0,
+  personal_root TEXT DEFAULT '',
+  enabled       INTEGER DEFAULT 1,
+  scan_state    TEXT DEFAULT 'idle',          -- idle | scanning | paused | error
+  scan_error    TEXT,
+  last_scan_at  REAL,
+  created_at    REAL
+);
+
+-- 目录授权：subpath 为空表示整个共享根
+CREATE TABLE IF NOT EXISTS grants (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id    INTEGER NOT NULL,
+  source_id  INTEGER NOT NULL,
+  subpath    TEXT NOT NULL DEFAULT '',
+  can_write  INTEGER DEFAULT 0,
+  created_at REAL,
+  UNIQUE(user_id, source_id, subpath)
+);
+CREATE INDEX IF NOT EXISTS idx_grants_user ON grants(user_id);
+
+-- 全量路径索引：目录与文件都有一行
+CREATE TABLE IF NOT EXISTS fs_entries (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_id  INTEGER NOT NULL,
+  rel_path   TEXT NOT NULL,
+  rel_key    TEXT NOT NULL,                   -- lower(rel_path)，Windows 语义去重
+  parent_rel TEXT NOT NULL DEFAULT '',
+  name       TEXT NOT NULL,
+  is_dir     INTEGER NOT NULL DEFAULT 0,
+  size       INTEGER,
+  mtime      REAL,
+  ext        TEXT,
+  parseable  INTEGER DEFAULT 0,
+  catalog_id INTEGER,
+  updated_at REAL,
+  UNIQUE(source_id, rel_key)
+);
+CREATE INDEX IF NOT EXISTS idx_fs_source_parent ON fs_entries(source_id, parent_rel);
+CREATE INDEX IF NOT EXISTS idx_fs_name ON fs_entries(name);
+
+-- 平台回收站：只记录经网页删除的条目
+CREATE TABLE IF NOT EXISTS trash_entries (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_id    INTEGER NOT NULL,
+  original_rel TEXT NOT NULL,
+  trash_rel    TEXT NOT NULL,
+  name         TEXT NOT NULL,
+  is_dir       INTEGER DEFAULT 0,
+  size         INTEGER,
+  deleted_by   INTEGER,
+  deleted_at   REAL,
+  expires_at   REAL
+);
+
+-- 分片上传会话
+CREATE TABLE IF NOT EXISTS upload_sessions (
+  id         TEXT PRIMARY KEY,
+  user_id    INTEGER NOT NULL,
+  source_id  INTEGER NOT NULL,
+  rel        TEXT NOT NULL DEFAULT '',
+  name       TEXT NOT NULL,
+  size       INTEGER NOT NULL,
+  temp_path  TEXT NOT NULL,
+  received   INTEGER DEFAULT 0,
+  created_at REAL
+);
+
+-- 文件名搜索（trigram 支持中文子串；2 字查询走 LIKE 兜底）
+CREATE VIRTUAL TABLE IF NOT EXISTS fs_fts USING fts5(
+  name, rel_path, tokenize='trigram'
+);
+
 -- API token（每用户一枚，只存哈希）
 CREATE TABLE IF NOT EXISTS api_tokens (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,

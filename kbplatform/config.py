@@ -27,6 +27,11 @@ class Config:
     # 开启后管理员能在管理台重新查看完整密钥，密钥弄丢不用换密钥，
     # 正在使用旧密钥的智能体不会被打断。详见 kbplatform/auth.py。
     token_recoverable: bool = True
+    # 2.0 文件底座
+    trash_days: int = 30
+    upload_max_mb: int = 2048
+    preview_dir: str = ""
+    source_scan_interval_sec: int = 300
 
     def __post_init__(self):
         if not self.db_path:
@@ -35,6 +40,8 @@ class Config:
             self.fts_path = os.path.join(self.data_dir, "fts.db")
         if not self.vector_dir:
             self.vector_dir = os.path.join(self.data_dir, "vectors")
+        if not self.preview_dir:
+            self.preview_dir = os.path.join(self.data_dir, "preview")
 
 
 def load_config(path: str) -> Config:
@@ -46,6 +53,7 @@ def load_config(path: str) -> Config:
     models = raw.get("models", {})
     security = raw.get("security", {})
     shares = raw.get("shares", {})
+    storage = raw.get("storage", {})
     drives = {k.upper(): v for k, v in raw.get("drives", {}).items()}
     return Config(
         monitor_roots=list(mon.get("roots", [])),
@@ -67,4 +75,8 @@ def load_config(path: str) -> Config:
                             or os.environ.get("KB_PUBLIC_BASE_URL", "")),
         # 密钥可恢复密文：默认开启，可在 config.toml 用 token_recoverable=false 关掉。
         token_recoverable=bool(security.get("token_recoverable", True)),
+        trash_days=int(storage.get("trash_days", 30)),
+        upload_max_mb=int(storage.get("upload_max_mb", 2048)),
+        preview_dir=str(storage.get("preview_dir", "")),
+        source_scan_interval_sec=int(storage.get("source_scan_interval_sec", 300)),
     )

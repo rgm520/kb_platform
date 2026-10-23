@@ -43,3 +43,14 @@ def test_migrate_paths_is_idempotent(tmp_path):
     migrate_paths(conn, dm)
     got = conn.execute("SELECT path FROM catalog").fetchone()[0]
     assert got == "\\\\192.0.2.19\\信息化管理\\AI知识库\\a.pdf"
+
+
+def test_v2_tables_and_fts(conn):
+    names = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type IN ('table','view')")}
+    assert {"storage_sources", "grants", "fs_entries", "trash_entries",
+            "fs_fts", "upload_sessions"} <= names
+    conn.execute("INSERT INTO fs_fts(rowid,name,rel_path) VALUES "
+                 "(1,'年度计划.docx','a/年度计划.docx')")
+    row = conn.execute("SELECT name FROM fs_fts WHERE fs_fts MATCH ?", ("年度计",)).fetchone()
+    assert row[0] == "年度计划.docx"
