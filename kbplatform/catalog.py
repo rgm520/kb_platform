@@ -48,6 +48,10 @@ def scan_root(root_unc: str, drive_map: dict[str, str], roots: list[str],
         for fn in filenames:
             if fn.startswith("."):
                 continue
+            # Office 打开文档时生成的属主/锁文件（~$xxx.docx）：没有正文，
+            # 解析必然失败。直接跳过，不建 catalog 行、不占提炼队列。
+            if fn.startswith("~$"):
+                continue
             full = os.path.join(dirpath, fn)
             ext = os.path.splitext(fn)[1].lower()
             try:

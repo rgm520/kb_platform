@@ -36,6 +36,15 @@ def test_scan_root_skips_recycle_hidden_and_kb_output(tmp_path):
     assert [r.name for r in recs] == ["a.pdf"]
 
 
+def test_scan_root_skips_office_lock_files(tmp_path):
+    """Office 的 ~$ 属主文件不是文档，不能进 catalog。"""
+    _mk(tmp_path, "a.docx")
+    _mk(tmp_path, "~$a.docx")
+    _mk(tmp_path, "~$b.pdf")
+    recs, _ = scan_root(str(tmp_path), {}, [], qps=1000)
+    assert [r.name for r in recs] == ["a.docx"]
+
+
 def test_scan_root_records_size_and_mtime(tmp_path):
     p = _mk(tmp_path, "a.pdf", b"hello")
     recs, _ = scan_root(str(tmp_path), {}, [], qps=1000)
