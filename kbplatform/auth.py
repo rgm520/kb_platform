@@ -186,6 +186,17 @@ def token_plaintext(conn: sqlite3.Connection, token_id: int) -> str | None:
     return _decrypt(row["token_enc"])
 
 
+# ---------------------------------------------------------------- 通用密文
+# 存储源密码与 API token 共用同一把由 session_secret 派生的主密钥。
+# 调用方只拿密文入库，解密只发生在服务端连接存储前。
+def encrypt_secret(plain: str) -> str | None:
+    return _encrypt(plain)
+
+
+def decrypt_secret(blob: str | None) -> str | None:
+    return _decrypt(blob)
+
+
 def diagnose_token(conn: sqlite3.Connection, presented: str) -> str:
     """判定一个无效密钥的失败原因（供 401 给出可执行的提示）。
 
