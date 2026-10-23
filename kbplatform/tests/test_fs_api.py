@@ -55,6 +55,18 @@ def test_list_only_granted_subtree(app, tmp_path):
     assert c.get(f"/api/v1/fs/list?source_id={sid}&rel=A/B/C").json()["entries"][0]["name"] == "c.txt"
 
 
+def test_admin_list_sees_all_entries(app, tmp_path):
+    share = tmp_path / "share_admin"
+    (share / "A").mkdir(parents=True)
+    (share / "B").mkdir()
+    (share / "root.txt").write_text("x", encoding="utf-8")
+    conn = app.state.conn
+    sid = _source(conn, share)
+    c, _ = _login(app, "root", role="admin")
+    body = c.get(f"/api/v1/fs/list?source_id={sid}&rel=").json()
+    assert [e["name"] for e in body["entries"]] == ["A", "B", "root.txt"]
+
+
 def test_sources_only_returns_granted_or_admin(app, tmp_path):
     conn = app.state.conn
     sid = _source(conn, tmp_path / "share")

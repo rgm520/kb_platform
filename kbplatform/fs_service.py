@@ -234,7 +234,7 @@ def register_fs_routes(app, cfg: Config, conn, require_user, require_admin, audi
                 entries = []
             else:
                 raise HTTPException(404, detail=f"目录不可读: {e}")
-        entries = filter_entries(gs, source.id, rel, entries)
+        entries = filter_entries(gs, source.id, rel, entries) if not _is_admin(user) else list(entries)
 
         # 授权路径比真实目录更深时，补出「下一段」导航占位
         have = {normalize_rel(e.rel) for e in entries}
