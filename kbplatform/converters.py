@@ -80,6 +80,35 @@ def convert_legacy(unc_path: str, out_dir: str) -> str | None:
     return None
 
 
+def convert_to_pdf(src_path: str, out_dir: str, stem: str | None = None) -> str | None:
+    """Office/OFD -> PDF（预览用）。成功返回 PDF 路径，失败返回 None。"""
+    so = soffice_path()
+    if not so:
+        return None
+    src = Path(src_path)
+    if not src.is_file():
+        return None
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    try:
+        subprocess.run(
+            [so, "--headless", "--norestore", "--convert-to", "pdf",
+             "--outdir", str(out), str(src)],
+            capture_output=True, timeout=180, check=False)
+    except Exception:
+        return None
+    produced = out / (src.stem + ".pdf")
+    if not produced.exists() or produced.stat().st_size <= 0:
+        return None
+    want = out / ((stem or src.stem) + ".pdf")
+    if want != produced:
+        try:
+            os.replace(produced, want)
+        except OSError:
+            return None
+    return str(want)
+
+
 # OCR 渲染 DPI。实测：150dpi 172.2s/页 识别 246 行、100dpi 136.3s/页 识别 248 行、
 # 72dpi 107.2s/页 识别 242 行。**100dpi 与 150dpi 识别质量相同但快 21%**，故取 100。
 OCR_DPI = int(os.environ.get("KB_OCR_DPI", "100"))

@@ -68,6 +68,26 @@ def test_sources_only_returns_granted_or_admin(app, tmp_path):
     assert len(ca.get("/api/v1/fs/sources").json()["sources"]) == 1
 
 
+def test_fs_api_preview_text_and_download(app, tmp_path):
+    share = tmp_path / "s"
+    (share / "d").mkdir(parents=True)
+    (share / "d" / "a.txt").write_text("你好，世界", encoding="utf-8")
+    conn = app.state.conn
+    conn.execute("INSERT INTO storage_sources(name,kind,root,writable,enabled,created_at) "
+                 "VALUES ('s','local',?,1,1,0)", (str(share),))
+    sid = conn.execute("SELECT id FROM storage_sources").fetchone()[0]
+    c, uid = _login(app)
+    _grant(conn, uid, sid, "", can_write=True)
+    r = c.get(f"/api/v1/fs/preview?source_id={sid}&rel=d/a.txt")
+    assert r.status_code == 200 and "你好" in r.text
+    r = c.get(f"/api/v1/fs/download?source_id={sid}&rel=d/a.txt")
+    assert r.status_code == 200
+    assert "attachment" in r.headers["content-disposition"]
+    assert "a.txt" in r.headers["content-disposition"]
+    assert c.get(f"/api/v1/fs/preview?source_id={sid}&rel=d/none.txt").status_code == 404
+    assert c.get(f"/api/v1/fs/preview?source_id={sid}&rel=../../x").status_code == 400
+
+
 def test_search_does_not_leak_other_branch(app, tmp_path):
     conn = app.state.conn
     share = tmp_path / "share2"

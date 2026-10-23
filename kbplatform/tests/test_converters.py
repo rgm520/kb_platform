@@ -62,3 +62,9 @@ def test_converters_do_not_raise_on_broken_input(tmp_path, monkeypatch):
     p = tmp_path / "a.doc"
     p.write_bytes(b"x")
     assert c.convert_legacy(str(p), str(tmp_path / "out")) is None
+
+
+def test_convert_to_pdf_returns_none_when_unavailable(tmp_path, monkeypatch):
+    from kbplatform import converters
+    monkeypatch.setattr(converters, "soffice_path", lambda: None)
+    assert converters.convert_to_pdf(str(tmp_path / "a.docx"), str(tmp_path)) is None
