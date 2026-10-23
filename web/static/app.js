@@ -125,6 +125,9 @@ async function loadStats() {
     ];
     $("#stat-cards").innerHTML = cards.map(x =>
       `<div class="card-stat ${x.c}"><div class="n">${x.n}</div><div class="l">${x.l}</div></div>`).join("");
+    const tabs = { all: s.total, done: bs.done || 0, pending: bs.pending || 0,
+                   failed: bs.failed || 0, skipped: bs.skipped || 0 };
+    for (const k in tabs) { const el = $("#tab-" + k); if (el) el.textContent = tabs[k]; }
   } catch (e) { toast("统计加载失败: " + e.message); }
 }
 async function loadDocs() {
@@ -135,6 +138,8 @@ async function loadDocs() {
   if (state.filters.share) q.set("share", state.filters.share);
   try {
     const r = await api("/api/v1/documents?" + q.toString());
+    const pages = Math.max(1, Math.ceil(r.total / r.page_size));
+    if (state.docs.page > pages) { state.docs.page = pages; return loadDocs(); }
     state.docs.total = r.total;
     const tb = $("#doc-table tbody");
     tb.innerHTML = "";
@@ -158,17 +163,35 @@ async function loadDocs() {
       tb.appendChild(tr);
     }
     $("#doc-total").textContent = "共 " + r.total + " 个文档";
-    $("#pg-info").textContent = `第 ${r.page} / ${Math.max(1, Math.ceil(r.total / r.page_size))} 页`;
+    $("#pg-info").textContent = `第 ${r.page} / ${pages} 页`;
+    $("#pg-first").disabled = r.page <= 1;
+    $("#pg-prev").disabled = r.page <= 1;
+    $("#pg-next").disabled = r.page >= pages;
+    $("#pg-last").disabled = r.page >= pages;
   } catch (e) { toast("文档列表加载失败: " + e.message); }
 }
 function statusText(s) {
   return ({ done: "已解析", pending: "待处理", failed: "失败", skipped: "已跳过" })[s] || s || "待处理";
 }
+function goPage(n) {
+  const pages = Math.max(1, Math.ceil(state.docs.total / state.docs.size));
+  state.docs.page = Math.min(Math.max(1, n), pages);
+  loadDocs();
+}
 $("#btn-refresh").addEventListener("click", () => { loadStats(); loadDocs(); });
-$("#f-status").addEventListener("change", e => { state.filters.status = e.target.value; state.docs.page = 1; loadDocs(); });
+$$("#status-tabs .tab").forEach(btn => btn.addEventListener("click", () => {
+  state.filters.status = btn.dataset.status || "";
+  state.docs.page = 1;
+  $$("#status-tabs .tab").forEach(b => b.classList.toggle("active", b === btn));
+  loadDocs();
+}));
 $("#f-share").addEventListener("change", e => { state.filters.share = e.target.value.trim(); state.docs.page = 1; loadDocs(); });
-$("#pg-prev").addEventListener("click", () => { if (state.docs.page > 1) { state.docs.page--; loadDocs(); } });
-$("#pg-next").addEventListener("click", () => { state.docs.page++; loadDocs(); });
+$("#f-share").addEventListener("keydown", e => { if (e.key === "Enter") { e.target.dispatchEvent(new Event("change")); } });
+$("#pg-size").addEventListener("change", e => { state.docs.size = parseInt(e.target.value, 10) || 50; state.docs.page = 1; loadDocs(); });
+$("#pg-first").addEventListener("click", () => goPage(1));
+$("#pg-prev").addEventListener("click", () => goPage(state.docs.page - 1));
+$("#pg-next").addEventListener("click", () => goPage(state.docs.page + 1));
+$("#pg-last").addEventListener("click", () => goPage(Number.MAX_SAFE_INTEGER));
 
 async function showDoc(id) {
   try {

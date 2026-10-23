@@ -553,14 +553,16 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
                       share: Optional[str] = None, page: int = 1,
                       page_size: int = 50, ctx=Depends(actor)):
         u = ctx["user"]
+        page = max(1, page)
+        page_size = min(max(10, page_size), 200)
         pred, params = scope_predicate(u)
         where = [pred]
         if status:
             where.append("c.status=?")
             params.append(status)
         if share:
-            where.append("c.share=?")
-            params.append(share)
+            where.append("c.share LIKE ?")
+            params.append(f"%{share}%")
         sql = f"SELECT c.* FROM catalog c WHERE {' AND '.join(where)} ORDER BY c.id LIMIT ? OFFSET ?"
         rows = conn.execute(sql, params + [page_size, (page - 1) * page_size]).fetchall()
         items = []

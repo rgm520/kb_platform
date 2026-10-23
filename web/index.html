@@ -40,10 +40,20 @@
     <!-- 看板 -->
     <section id="p-board" class="page">
       <div id="stat-cards" class="cards"></div>
+      <div class="status-tabs" id="status-tabs">
+        <button class="tab active" data-status="">全部<b id="tab-all">0</b></button>
+        <button class="tab" data-status="done">已解析<b id="tab-done">0</b></button>
+        <button class="tab" data-status="pending">待处理<b id="tab-pending">0</b></button>
+        <button class="tab" data-status="failed">失败<b id="tab-failed">0</b></button>
+        <button class="tab" data-status="skipped">已跳过<b id="tab-skipped">0</b></button>
+      </div>
       <div class="toolbar">
-        <select id="f-status"><option value="">全部状态</option><option value="done">已解析</option>
-          <option value="pending">待处理</option><option value="failed">失败</option><option value="skipped">已跳过</option></select>
         <input id="f-share" placeholder="按共享筛选（模糊）">
+        <select id="pg-size">
+          <option value="20">20 条/页</option>
+          <option value="50" selected>50 条/页</option>
+          <option value="100">100 条/页</option>
+        </select>
         <button id="btn-refresh">刷新</button>
         <span id="doc-total" class="muted"></span>
       </div>
@@ -53,7 +63,13 @@
           <tbody></tbody>
         </table>
       </div>
-      <div class="pager"><button id="pg-prev">上一页</button><span id="pg-info"></span><button id="pg-next">下一页</button></div>
+      <div class="pager">
+        <button id="pg-first">首页</button>
+        <button id="pg-prev">上一页</button>
+        <span id="pg-info"></span>
+        <button id="pg-next">下一页</button>
+        <button id="pg-last">末页</button>
+      </div>
     </section>
 
     <!-- 图谱 -->
