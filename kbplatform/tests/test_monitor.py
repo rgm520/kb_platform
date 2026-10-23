@@ -116,6 +116,23 @@ def test_job_queue_claims_in_fifo_order(tmp_path):
     assert q.claim().id == b
 
 
+def test_job_queue_enqueue_is_idempotent(tmp_path):
+    """同一文档已有在途任务时，重复入队不能新增行（否则队列会无限膨胀）。"""
+    conn = init_db(str(tmp_path / "kb.db"))
+    q = JobQueue(conn)
+    first = q.enqueue("index", 5)
+    assert q.enqueue("index", 5) == first
+    assert conn.execute("SELECT count(*) FROM jobs").fetchone()[0] == 1
+
+    q.claim("index")                    # 变成 running，仍然算在途
+    assert q.enqueue("index", 5) == first
+    assert conn.execute("SELECT count(*) FROM jobs").fetchone()[0] == 1
+
+    q.finish(first)
+    assert q.enqueue("index", 5) != first   # 上一个已结束，可以再排
+    assert conn.execute("SELECT count(*) FROM jobs").fetchone()[0] == 2
+
+
 def test_requeue_stale_returns_running_jobs(tmp_path):
     conn = init_db(str(tmp_path / "kb.db"))
     q = JobQueue(conn)

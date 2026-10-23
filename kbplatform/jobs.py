@@ -22,6 +22,17 @@ class JobQueue:
         self.conn = conn
 
     def enqueue(self, kind: str, catalog_id: int) -> int:
+        """入队；同一 (kind, catalog_id) 已有在途任务时复用，不重复插入。
+
+        扫描器每个周期都可能把同一文件再报一次（重启后快照丢失尤其明显），
+        若不去重，队列会随扫描轮次无限膨胀。
+        """
+        row = self.conn.execute(
+            "SELECT id FROM jobs WHERE kind=? AND catalog_id=? "
+            "AND state IN ('queued','running') ORDER BY id LIMIT 1",
+            (kind, catalog_id)).fetchone()
+        if row:
+            return int(row[0])
         cur = self.conn.execute(
             "INSERT INTO jobs(kind, catalog_id, state, attempts, created_at)"
             " VALUES (?,?,'queued',0,?)",

@@ -32,17 +32,35 @@ class Pipeline:
         # 解析算力池：本地 + 远端多个大模型，按权重调度
         self.pool = models_mod.ParsePool(self.conn)
         self._warm_snapshot()
+        self._reconcile_pending()
 
     def _warm_snapshot(self) -> None:
-        """用 catalog 表里已完成的记录预热监控快照。
+        """用 catalog 全量记录预热监控快照。
 
-        监控快照在内存里，服务重启后会丢，导致**全部文件被当成新增重跑一遍**
-        （每个文件 30 秒 LLM 提炼，代价很大）。这里在启动时用 catalog 回填。
+        监控快照在内存里，服务重启后会丢。必须回填**所有**已登记文件，
+        不能只回填已完成的：否则 pending/排队中的文件每个扫描周期都会
+        被当成新增重新入队，队列随轮次越积越多（实测 8 分钟涨 800 个）。
         """
         rows = self.conn.execute(
-            "SELECT path, size, mtime FROM catalog WHERE tier1_done=1").fetchall()
+            "SELECT path, size, mtime FROM catalog").fetchall()
         for r in rows:
             self.monitor._snapshot[r[0]] = (r[1] or 0, r[2] or 0.0)
+
+    def _reconcile_pending(self) -> None:
+        """给没有在途任务的 pending 文档补索引任务。
+
+        任务行可能因历史 bug / 手工清理丢失，文档会永远停在 pending。
+        enqueue 本身幂等，这里只补真正缺任务的。
+        """
+        rows = self.conn.execute(
+            "SELECT c.id FROM catalog c WHERE c.tier1_done=0 "
+            "AND c.status='pending' AND NOT EXISTS ("
+            "  SELECT 1 FROM jobs j WHERE j.kind='index' AND j.catalog_id=c.id"
+            "  AND j.state IN ('queued','running'))").fetchall()
+        for (cid,) in rows:
+            self.queue.enqueue("index", cid)
+        if rows:
+            print(f"[pipeline] 启动补队 {len(rows)} 个待索引文档", flush=True)
 
     # ------------------------------------------------------------ 单轮
     def run_once(self) -> dict:

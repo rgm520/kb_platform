@@ -1,6 +1,8 @@
 import pytest
 
+from kbplatform.catalog import scan_root
 from kbplatform.config import Config
+from kbplatform.db import upsert_catalog
 from kbplatform.pipeline import Pipeline
 
 
@@ -37,6 +39,24 @@ def test_pipeline_requeues_stale_running_jobs_on_startup(tmp_path):
 
     p2 = Pipeline(_cfg(tmp_path))
     assert p2.conn.execute("SELECT state FROM jobs").fetchone()[0] == "queued"
+
+
+def test_pipeline_snapshot_covers_pending_files(tmp_path):
+    """重启后 pending 文件不能被当成新增，否则每轮扫描重复入队。"""
+    (tmp_path / "a.md").write_text("信创资源池由总部统一规划建设。\n" * 20, encoding="utf-8")
+    p = Pipeline(_cfg(tmp_path))
+    for r in scan_root(str(tmp_path), {}, [], qps=1000)[0]:
+        upsert_catalog(p.conn, r)
+    assert p.conn.execute("SELECT status FROM catalog").fetchone()[0] == "pending"
+
+    p2 = Pipeline(_cfg(tmp_path))
+    assert p2.monitor.poll_once() == []
+    # 启动对账补一个任务；再次重启不能重复补
+    assert p2.conn.execute(
+        "SELECT count(*) FROM jobs WHERE kind='index' AND state='queued'").fetchone()[0] == 1
+    p3 = Pipeline(_cfg(tmp_path))
+    assert p3.conn.execute(
+        "SELECT count(*) FROM jobs WHERE kind='index' AND state='queued'").fetchone()[0] == 1
 
 
 def test_pipeline_marks_catalog_done_with_tier_flags(tmp_path, monkeypatch):
