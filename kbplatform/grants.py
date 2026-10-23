@@ -59,6 +59,10 @@ def _next_component(rel: str, subpath: str) -> str | None:
     return None
 
 
+# 供文件接口补「祖先导航占位」用
+next_component = _next_component
+
+
 def user_grants(conn, user) -> list[Grant]:
     if _is_admin(user):
         return []

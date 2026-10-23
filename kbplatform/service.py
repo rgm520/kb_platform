@@ -25,7 +25,9 @@ from pydantic import BaseModel, Field
 from kbplatform import auth, models as models_mod
 from kbplatform.config import Config, load_config
 from kbplatform.db import init_db, ThreadLocalConn, write_with_retry
+from kbplatform.fs_service import register_fs_routes
 from kbplatform.retrieval import Retriever
+from kbplatform.scanner import SourceScanner
 from kbplatform.scopes import (load_restricted, load_scopes, describe_scopes,
                                is_restricted)
 from kbplatform.vectors import VectorStore
@@ -284,6 +286,19 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
              1 if restricted else 0, ip, time.time()))
         if not ok:
             print(f"[audit] 数据库繁忙，丢弃一条审计记录 action={action}", flush=True)
+
+    # ------------------------------------------------------------ 2.0 文件域
+    app.state.scanner = SourceScanner(conn, cfg)
+    register_fs_routes(app, cfg, conn, require_user, require_admin, audit)
+    if cfg.source_scan_interval_sec > 0:
+        app.state.scanner.start()
+
+    @app.on_event("shutdown")
+    def _stop_scanner():
+        try:
+            app.state.scanner.stop()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------ 模型
     def pick_model(conn_, model_ref, user_id):
