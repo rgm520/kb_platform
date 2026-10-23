@@ -177,6 +177,11 @@ def remove_file(conn: sqlite3.Connection, fts_path: str, vs, catalog_id: int) ->
         set_status(conn, catalog_id, "skipped", "源文件已删除，索引与图谱产物已清理")
 
 
+def clear_artifacts(conn: sqlite3.Connection, fts_path: str, vs, file_path: str) -> None:
+    """覆盖上传前清空旧产物；catalog 行保留，稍后重新解析。"""
+    _delete_artifacts(conn, fts_path, vs, file_path)
+
+
 def process_changes(conn: sqlite3.Connection, fts_path: str, vs,
                     changes: list[Change], embed_model: str = "bge-m3") -> list[IndexResult]:
     """把监控变更落到索引上。"""
