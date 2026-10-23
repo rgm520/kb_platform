@@ -18,7 +18,8 @@ import kb.llm as llm
 import kb.parsers as parsers
 
 from kbplatform import fts
-from kbplatform.converters import LEGACY_EXT, SCAN_EXT, convert_legacy, ocr_pdf
+from kbplatform.converters import (LEGACY_EXT, SCAN_EXT, convert_legacy,
+                                   is_ocr_backlog, ocr_pdf)
 from kbplatform.db import set_status
 from kbplatform.monitor import Change
 
@@ -33,6 +34,16 @@ class IndexResult:
 
 def _fail(conn: sqlite3.Connection, catalog_id: int, msg: str) -> IndexResult:
     set_status(conn, catalog_id, "failed", msg)
+    return IndexResult(catalog_id, [], False, msg)
+
+
+def _defer_ocr(conn: sqlite3.Connection, catalog_id: int, msg: str) -> IndexResult:
+    """扫描件暂不 OCR：标 skipped + needs_ocr，让出队列（spec D9）。"""
+    set_status(conn, catalog_id, "skipped", msg)
+    conn.execute(
+        "UPDATE catalog SET needs_ocr=1, scanned=1, updated_at=? WHERE id=?",
+        (time.time(), catalog_id))
+    conn.commit()
     return IndexResult(catalog_id, [], False, msg)
 
 
@@ -115,9 +126,14 @@ def index_file(conn: sqlite3.Connection, fts_path: str, vs, catalog_id: int,
         except Exception:
             meta0 = {}
         if meta0.get("need_ocr"):
+            # 存量不批量 OCR：单页约 136 秒，一个大扫描件能堵死整条队列。
+            if is_ocr_backlog(unc_path):
+                return _defer_ocr(conn, catalog_id,
+                                  "扫描件：存量不自动 OCR（可在看板手动触发重跑）")
             ocr_txt = ocr_pdf(unc_path, tmpdir)
             if not ocr_txt:
-                return _fail(conn, catalog_id, "扫描件待 OCR 支持")
+                return _defer_ocr(conn, catalog_id,
+                                  "扫描件：OCR 失败/超时，已跳过")
             parse_target = ocr_txt
 
     try:

@@ -1,3 +1,6 @@
+import os
+import time
+
 import pytest
 
 from kbplatform.db import init_db, upsert_catalog
@@ -120,7 +123,42 @@ def test_reindex_does_not_leave_orphan_fts_rows(tmp_path):
     assert orphan == [], f"FTS 残留孤儿行: {orphan}"
 
 
+def test_backlog_scan_pdf_is_skipped_without_ocr(tmp_path, monkeypatch):
+    """存量扫描件不走 OCR（136 秒/页会堵死队列），标 skipped + needs_ocr。"""
+    import kbplatform.indexer as ix
+
+    conn, fts_path, vs, cid, path = _setup(tmp_path, "a.pdf")
+    monkeypatch.setattr(ix.parsers, "parse_file",
+                        lambda *a, **k: ([], {"need_ocr": True}))
+    called = []
+    monkeypatch.setattr(ix, "ocr_pdf", lambda *a, **k: called.append(1) or None)
+    monkeypatch.setattr(ix, "is_ocr_backlog", lambda p: True)
+
+    res = ix.index_file(conn, fts_path, vs, cid, path)
+    assert res.ok is False
+    row = conn.execute("SELECT status, needs_ocr FROM catalog WHERE id=?", (cid,)).fetchone()
+    assert row[0] == "skipped" and row[1] == 1
+    assert called == [], "存量扫描件不应触发 OCR"
+
+
+def test_new_scan_pdf_still_goes_through_ocr(tmp_path, monkeypatch):
+    """新文件仍然自动 OCR（spec D9：监控范围内新文件自动处理）。"""
+    import kbplatform.indexer as ix
+
+    conn, fts_path, vs, cid, path = _setup(tmp_path, "a.pdf")
+    monkeypatch.setattr(ix.parsers, "parse_file",
+                        lambda *a, **k: ([], {"need_ocr": True}))
+    monkeypatch.setattr(ix, "is_ocr_backlog", lambda p: False)
+    called = []
+    monkeypatch.setattr(ix, "ocr_pdf",
+                        lambda *a, **k: called.append(1) or path)
+
+    ix.index_file(conn, fts_path, vs, cid, path)
+    assert called == [1]
+
+
 def test_reindex_does_not_leave_orphan_knowledge(tmp_path):
+
     """重跑索引必须清掉旧块的 knowledge / edges，否则 knowledge 行数会多于 chunks。"""
     conn, fts_path, vs, cid, path = _setup(tmp_path)
     index_file(conn, fts_path, vs, cid, path)

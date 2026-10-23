@@ -12,6 +12,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 LEGACY_EXT = {".doc", ".ppt", ".xls"}
@@ -83,6 +84,25 @@ def convert_legacy(unc_path: str, out_dir: str) -> str | None:
 # 72dpi 107.2s/页 识别 242 行。**100dpi 与 150dpi 识别质量相同但快 21%**，故取 100。
 OCR_DPI = int(os.environ.get("KB_OCR_DPI", "100"))
 
+# 单线程摄入下，一个 28 页扫描件要 OCR 约 1 小时，会把整个队列堵死。
+# spec D9：存量不批量跑 OCR。mtime 早于 N 天的扫描件直接标「待 OCR」跳过；
+# <=0 表示不看新旧、全部 OCR（手工补跑时用）。
+OCR_BACKLOG_DAYS = float(os.environ.get("KB_OCR_BACKLOG_DAYS", "7"))
+# 新文件的 OCR 上限，防止单个大扫描件无限占用队列。
+OCR_MAX_PAGES = int(os.environ.get("KB_OCR_MAX_PAGES", "20"))
+OCR_MAX_SECONDS = float(os.environ.get("KB_OCR_MAX_SECONDS", "600"))
+
+
+def is_ocr_backlog(unc_path: str, now: float | None = None) -> bool:
+    """mtime 早于 OCR_BACKLOG_DAYS 天的扫描件视为存量，不自动 OCR。"""
+    if OCR_BACKLOG_DAYS <= 0:
+        return False
+    try:
+        mtime = os.stat(unc_path).st_mtime
+    except OSError:
+        return True
+    return (now if now is not None else time.time()) - mtime > OCR_BACKLOG_DAYS * 86400
+
 
 def _make_ocr():
     """构造 PaddleOCR 实例。兼容 3.x 与 2.x 的构造参数差异。
@@ -132,8 +152,9 @@ def _extract_lines(result) -> list[str]:
     return lines
 
 
-def ocr_pdf(unc_path: str, out_dir: str) -> str | None:
-    """扫描件 PDF -> 纯文本 .txt。成功返回文本路径，失败返回 None。"""
+def ocr_pdf(unc_path: str, out_dir: str, max_pages: int | None = None,
+            max_seconds: float | None = None) -> str | None:
+    """扫描件 PDF -> 纯文本 .txt。成功返回文本路径，失败/超限返回 None。"""
     if not ocr_available():
         return None
     try:
@@ -146,6 +167,9 @@ def ocr_pdf(unc_path: str, out_dir: str) -> str | None:
     except Exception:
         return None
 
+    max_pages = OCR_MAX_PAGES if max_pages is None else max_pages
+    max_seconds = OCR_MAX_SECONDS if max_seconds is None else max_seconds
+
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     try:
         ocr = _make_ocr()
@@ -153,9 +177,16 @@ def ocr_pdf(unc_path: str, out_dir: str) -> str | None:
         return None
 
     chunks: list[str] = []
+    started = time.time()
     try:
         doc = pymupdf.open(unc_path)
-        for page in doc:
+        for idx, page in enumerate(doc):
+            if max_pages and idx >= max_pages:
+                doc.close()
+                return None
+            if max_seconds and time.time() - started > max_seconds:
+                doc.close()
+                return None
             pix = page.get_pixmap(dpi=OCR_DPI)
             img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
             arr = np.array(img)

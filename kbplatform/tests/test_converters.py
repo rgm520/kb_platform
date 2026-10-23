@@ -37,6 +37,24 @@ def test_ocr_returns_none_when_ocr_unavailable(tmp_path, monkeypatch):
     assert c.ocr_pdf(str(p), str(tmp_path / "out")) is None
 
 
+def test_is_ocr_backlog_uses_mtime(tmp_path, monkeypatch):
+    import kbplatform.converters as c
+    monkeypatch.setattr(c, "OCR_BACKLOG_DAYS", 7.0)
+    p = tmp_path / "a.pdf"
+    p.write_bytes(b"x")
+    st = p.stat().st_mtime
+    assert c.is_ocr_backlog(str(p), now=st + 8 * 86400) is True
+    assert c.is_ocr_backlog(str(p), now=st + 1 * 86400) is False
+
+
+def test_is_ocr_backlog_disabled_when_days_le_zero(tmp_path, monkeypatch):
+    import kbplatform.converters as c
+    monkeypatch.setattr(c, "OCR_BACKLOG_DAYS", 0.0)
+    p = tmp_path / "a.pdf"
+    p.write_bytes(b"x")
+    assert c.is_ocr_backlog(str(p), now=p.stat().st_mtime + 999 * 86400) is False
+
+
 def test_converters_do_not_raise_on_broken_input(tmp_path, monkeypatch):
     """降级原则：不可用/出错一律返回 None，绝不抛异常打断流水线。"""
     import kbplatform.converters as c
