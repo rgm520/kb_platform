@@ -113,10 +113,12 @@ class Retriever:
         if not nbr_ids:
             return []
         bm = ",".join("?" * len(nbr_ids))
+        # {bm} 在 SQL 里出现两次（src IN / dst IN），参数也必须给两遍，
+        # 否则 sqlite 报 "Incorrect number of bindings supplied"（曾导致 /query 随机 500）。
         rows = self.conn.execute(
             f"""SELECT DISTINCT chunk_id FROM edges
                 WHERE chunk_id IS NOT NULL AND (src IN ({bm}) OR dst IN ({bm}))
-                LIMIT ?""", nbr_ids + [limit]).fetchall()
+                LIMIT ?""", nbr_ids + nbr_ids + [limit]).fetchall()
         return [r[0] for r in rows]
 
     def _wiki_ids_for(self, query: str, topk: int) -> list[int]:
