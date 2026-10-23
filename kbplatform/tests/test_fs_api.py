@@ -179,3 +179,59 @@ def test_overwrite_upload_resets_parse_state_and_requeues(app, tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM jobs WHERE state='queued'").fetchone()[0] == 1
 
 
+def test_delete_moves_to_trash_restore_and_search_cleanup(app, tmp_path):
+    share = tmp_path / "s"
+    (share / "d").mkdir(parents=True)
+    (share / "d" / "a.md").write_text("正文" * 20, encoding="utf-8")
+    conn = app.state.conn
+    sid = _source(conn, share)
+    from kbplatform.fsindex import scan_source, search
+    from kbplatform.storage import LocalAdapter, source_from_row
+    scan_source(conn, source_from_row(conn.execute(
+        "SELECT * FROM storage_sources WHERE id=?", (sid,)).fetchone()), LocalAdapter(str(share)))
+    c, uid = _login(app)
+    _grant(conn, uid, sid, "", can_write=True)
+    r = c.post("/api/v1/fs/delete", json={"source_id": sid, "rels": ["d/a.md"]})
+    assert r.status_code == 200, r.text
+    assert len(r.json()["deleted"]) == 1
+    assert not (share / "d" / "a.md").exists()
+    assert search(conn, "a.md", None) == []
+    items = c.get("/api/v1/fs/trash").json()["items"]
+    assert len(items) == 1 and items[0]["original_rel"] == "d\\a.md"
+    tid = r.json()["deleted"][0]
+    assert c.post(f"/api/v1/fs/trash/{tid}/restore").status_code == 200
+    assert (share / "d" / "a.md").exists()
+    assert c.get("/api/v1/fs/trash").json()["items"] == []
+
+
+def test_delete_grant_root_is_skipped(app, tmp_path):
+    share = tmp_path / "s"
+    (share / "A" / "B").mkdir(parents=True)
+    (share / "A" / "B" / "x.txt").write_text("x", encoding="utf-8")
+    conn = app.state.conn
+    sid = _source(conn, share)
+    c, uid = _login(app)
+    _grant(conn, uid, sid, "A", can_write=True)
+    r = c.post("/api/v1/fs/delete", json={"source_id": sid, "rels": ["A"]})
+    assert r.status_code == 200
+    assert r.json()["deleted"] == []
+    assert r.json()["skipped"][0]["rel"] == "A"
+    assert (share / "A" / "B" / "x.txt").exists()
+    r = c.post("/api/v1/fs/delete", json={"source_id": sid, "rels": ["A/B/x.txt"]})
+    assert len(r.json()["deleted"]) == 1
+
+
+def test_admin_purge_trash(app, tmp_path):
+    share = tmp_path / "s"
+    share.mkdir()
+    (share / "a.txt").write_text("x", encoding="utf-8")
+    conn = app.state.conn
+    sid = _source(conn, share)
+    ca, _ = _login(app, "root", role="admin")
+    r = ca.post("/api/v1/fs/delete", json={"source_id": sid, "rels": ["a.txt"]})
+    tid = r.json()["deleted"][0]
+    assert ca.delete(f"/api/v1/fs/trash/{tid}").status_code == 200
+    assert ca.get("/api/v1/fs/trash").json()["items"] == []
+
+
+

@@ -421,3 +421,145 @@ def register_fs_routes(app, cfg: Config, conn, require_user, require_admin, audi
               hit_paths=[path], ip=None)
         entry = _entry_dict(conn, source.id, e, False)
         return {"entry": entry, "catalog_id": cid, "queued": bool(parseable)}
+
+    # ------------------------------------------------------------ 回收站
+    def _grant_root_blocked(source, rel: str) -> bool:
+        rel = normalize_rel(rel)
+        if not rel:
+            return True
+        for g in conn.execute("SELECT subpath FROM grants WHERE source_id=?",
+                              (source.id,)).fetchall():
+            sub = normalize_rel(g["subpath"])
+            if sub and (sub == rel or sub.startswith(rel + "\\")):
+                return True
+        pr = normalize_rel(source.personal_root)
+        return bool(pr) and (pr == rel or pr.startswith(rel + "\\"))
+
+    def _cleanup_deleted(source, rels: list[str]) -> None:
+        for rel in rels:
+            path = fsindex.entry_path(source, rel)
+            row = conn.execute("SELECT id FROM catalog WHERE path=?", (path,)).fetchone()
+            if row:
+                indexer.remove_file(conn, cfg.fts_path, app.state.scanner.vs, int(row[0]))
+
+    @app.post("/api/v1/fs/delete")
+    def fs_delete(payload: dict = Body(...), user=Depends(require_user)):
+        try:
+            sid = int(payload["source_id"])
+        except Exception:
+            raise HTTPException(400, detail="source_id 不合法")
+        rels = payload.get("rels") or []
+        if not isinstance(rels, list):
+            raise HTTPException(400, detail="rels 必须是数组")
+        row = _source_row(conn, sid)
+        source, adapter = _adapter(conn, row)
+        gs = user_grants(conn, user)
+        deleted, skipped = [], []
+        for raw in rels:
+            rel = normalize_rel(raw)
+            if not rel or not is_safe_rel(rel):
+                skipped.append({"rel": rel, "reason": "路径不合法"})
+                continue
+            if not _write_ok(user, gs, source, rel):
+                skipped.append({"rel": rel, "reason": "没有写权限"})
+                continue
+            if _grant_root_blocked(source, rel):
+                skipped.append({"rel": rel, "reason": "授权根或平台目录不可删除"})
+                continue
+            e = adapter.stat(rel)
+            if e is None:
+                skipped.append({"rel": rel, "reason": "文件不存在"})
+                continue
+            day = time.strftime("%Y%m%d")
+            base = f"_kb_trash\\{day}"
+            trash_rel = normalize_rel(f"{base}\\{uuid.uuid4().hex}_{e.name}")
+            try:
+                adapter.mkdirs(base)
+                adapter.rename(rel, trash_rel)
+            except Exception as ex:
+                skipped.append({"rel": rel, "reason": f"移入回收站失败: {ex}"})
+                continue
+            now = time.time()
+            cur = conn.execute(
+                "INSERT INTO trash_entries(source_id,original_rel,trash_rel,name,is_dir,"
+                "size,deleted_by,deleted_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                (source.id, rel, trash_rel, e.name, 1 if e.is_dir else 0,
+                 0 if e.is_dir else e.size, user["id"], now,
+                 now + cfg.trash_days * 86400))
+            removed = fsindex.delete_subtree(conn, source.id, rel)
+            _cleanup_deleted(source, removed)
+            deleted.append(int(cur.lastrowid))
+            conn.commit()
+        audit(user["id"], None, "delete", question=f"{source.name}:{len(deleted)}",
+              hit_paths=[normalize_rel(r) for r in rels], ip=None)
+        return {"deleted": deleted, "skipped": skipped}
+
+    @app.get("/api/v1/fs/trash")
+    def fs_trash(user=Depends(require_user)):
+        sql = ("SELECT t.*, s.name AS source_name FROM trash_entries t "
+               "LEFT JOIN storage_sources s ON s.id=t.source_id ")
+        if _is_admin(user):
+            rows = conn.execute(sql + "ORDER BY t.deleted_at DESC").fetchall()
+        else:
+            rows = conn.execute(sql + "WHERE t.deleted_by=? ORDER BY t.deleted_at DESC",
+                                (user["id"],)).fetchall()
+        return {"items": [{
+            "id": r["id"], "source_id": r["source_id"],
+            "source_name": r["source_name"] or "", "original_rel": r["original_rel"],
+            "name": r["name"], "is_dir": bool(r["is_dir"]), "size": r["size"] or 0,
+            "deleted_at": r["deleted_at"], "expires_at": r["expires_at"],
+        } for r in rows]}
+
+    @app.post("/api/v1/fs/trash/{trash_id}/restore")
+    def fs_restore(trash_id: int, user=Depends(require_user)):
+        t = conn.execute("SELECT * FROM trash_entries WHERE id=?", (trash_id,)).fetchone()
+        if t is None or (t["deleted_by"] != user["id"] and not _is_admin(user)):
+            raise HTTPException(404, detail="回收站条目不存在")
+        row = _source_row(conn, int(t["source_id"]))
+        source, adapter = _adapter(conn, row)
+        original = normalize_rel(t["original_rel"])
+        parent = original.rsplit("\\", 1)[0] if "\\" in original else ""
+        if adapter.stat(original) is not None:
+            raise HTTPException(409, detail="原位置已有同名文件")
+        try:
+            if parent:
+                adapter.mkdirs(parent)
+            adapter.rename(normalize_rel(t["trash_rel"]), original)
+        except Exception as e:
+            raise HTTPException(500, detail=f"恢复失败: {e}")
+        e = adapter.stat(original)
+        if e is not None:
+            fsindex.upsert_entry(conn, source, e)
+            ext = os.path.splitext(e.name)[1].lower()
+            if not e.is_dir and ext in PARSEABLE_EXT:
+                cid = upsert_catalog(conn, FileRecord(
+                    path=fsindex.entry_path(source, original),
+                    share=split_share(source.root)[0] or source.name,
+                    rel_path=original, name=e.name, ext=ext, size=e.size, mtime=e.mtime))
+                app.state.scanner.queue.enqueue("index", cid)
+                conn.execute("UPDATE fs_entries SET catalog_id=? WHERE source_id=? AND rel_key=?",
+                             (cid, source.id, rel_key(original)))
+            if e.is_dir:
+                app.state.scanner.trigger(source.id)
+        conn.execute("DELETE FROM trash_entries WHERE id=?", (trash_id,))
+        conn.commit()
+        audit(user["id"], None, "restore", question=f"{source.name}:{original}",
+              hit_paths=[original], ip=None)
+        return {"restored": original}
+
+    @app.delete("/api/v1/fs/trash/{trash_id}")
+    def fs_purge(trash_id: int, user=Depends(require_admin)):
+        t = conn.execute("SELECT * FROM trash_entries WHERE id=?", (trash_id,)).fetchone()
+        if t is None:
+            raise HTTPException(404, detail="回收站条目不存在")
+        row = _source_row(conn, int(t["source_id"]))
+        source, adapter = _adapter(conn, row)
+        try:
+            adapter.remove(normalize_rel(t["trash_rel"]))
+        except Exception:
+            pass
+        conn.execute("DELETE FROM trash_entries WHERE id=?", (trash_id,))
+        conn.commit()
+        audit(user["id"], None, "purge", question=f"{source.name}:{t['original_rel']}",
+              hit_paths=[t["original_rel"]], ip=None)
+        return {"purged": True}
