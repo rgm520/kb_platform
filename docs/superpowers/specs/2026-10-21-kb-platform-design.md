@@ -2,7 +2,7 @@
 
 - 日期：2026-10-21
 - 状态：待评审
-- 位置：`D:\opencode`（项目根）
+- 位置：`D:\kb-platform`（项目根）
 
 ---
 
@@ -16,7 +16,7 @@
 
 目标：建一个**给全公司员工用的知识平台**，把 NAS 里的文档变成可检索、可视化、可被其他智能体调用的知识资产。
 
-**核心认知**：本项目不是"从零造 RAG"。底层引擎（解析 → LLM 知识提炼 → 向量化 → 图谱 → 混合检索 → 带引用溯源问答）已在 `D:\opencode\kb` 跑通并实测。本项目是**在已验证的引擎外面套一个可用的平台**，并把规模从 1 个文档扩到 28 万份。
+**核心认知**：本项目不是"从零造 RAG"。底层引擎（解析 → LLM 知识提炼 → 向量化 → 图谱 → 混合检索 → 带引用溯源问答）已在 `D:\kb-platform\kb` 跑通并实测。本项目是**在已验证的引擎外面套一个可用的平台**，并把规模从 1 个文档扩到 28 万份。
 
 ## 2. 目标 / 非目标 / 反目标
 
@@ -195,7 +195,7 @@ D: 盘可用 209 GB，**可容纳**。
 └───────┬────────┘  │ bge-m3       │   └─────────────────────────┘
         │           └──────────────┘
 ┌───────▼────────────────────────────────────────────────────────┐
-│ SQLite (D:\opencode\kb\data\kb.db)                             │
+│ SQLite (D:\kb-platform\kb\data\kb.db)                             │
 │  catalog(28万文件目录) │ chunks │ vectors │ knowledge           │
 │  nodes │ edges │ users │ scopes │ tokens │ agents │ models      │
 └────────────────────────────────────────────────────────────────┘
@@ -220,7 +220,7 @@ CREATE TABLE catalog (
   status        TEXT,                     -- pending|queued|parsing|done|failed|skipped
   status_detail TEXT,                     -- 失败原因
   chunk_count   INTEGER DEFAULT 0,
-  tier1_done    INTEGER DEFAULT 0,        -- 已完成分块+索引+向���化
+  tier1_done    INTEGER DEFAULT 0,        -- 已完成分块+索引+向量化
   tier2_done    INTEGER DEFAULT 0,        -- 已完成 LLM 提炼 + 建图
   kp_count      INTEGER DEFAULT 0,
   edge_count    INTEGER DEFAULT 0,
@@ -746,8 +746,8 @@ WorkBuddy 支持 MCP 插件。把 API 包一层 MCP tools 暴露（`kb_query` / 
 
 - **运行方式**：Windows 服务。本机无 NSSM，用 `sc.exe create` 指向 `python.exe -m uvicorn ...`（需配合一个 .cmd 包装器）；或用计划任务设为开机自启。**建议先用计划任务**，出错更好排查
 - **配置**：单一 `config.toml`（服务端口、NAS 路径、模型默认值、扫描限流、ACL 策略）
-- **日志**：`D:\opencode\kb\logs\`，按天轮转
-- **数据目录**：`D:\opencode\kb\data\`（kb.db、fts.db、catalog.db、logs）
+- **日志**：`D:\kb-platform\kb\logs\`，按天轮转
+- **数据目录**：`D:\kb-platform\kb\data\`（kb.db、fts.db、catalog.db、logs）
 - **备份**：kb.db + catalog.db 每日冷备到 D 盘另一目录；**NAS 侧只读挂载，绝不写业务数据**（NAS 磁盘只剩 5%）
 
 ## 9. 风险与未决事项

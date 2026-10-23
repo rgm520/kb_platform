@@ -140,7 +140,7 @@ class ChangePwdReq(BaseModel):
     new_password: str
 
 
-def make_app(config_path: str = "D:/opencode/config.toml") -> FastAPI:
+def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
     cfg = load_config(config_path)
     init_db(cfg.db_path)                      # 建表 + 补列（幂等）
     # 请求线程各自持有一条连接：共享一条连接时，别的线程 commit 会把
@@ -805,7 +805,7 @@ def make_app(config_path: str = "D:/opencode/config.toml") -> FastAPI:
         """测试模型连通性与上下文配置。
 
         远端 Ollama 最容易踩的坑是 runner 默认 num_ctx=4096 导致长提示被
-        **静默截断**——这里用一段较长���提示回显实际处理的 token 数，
+        **静默截断**——这里用一段较长的提示回显实际处理的 token 数，
         让管理员一眼看出有没有被截。
         """
         m = models_mod.get_model(conn, model_id)

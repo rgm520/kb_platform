@@ -37,7 +37,7 @@ def test_basic_auth_header_is_sent(monkeypatch):
 
     _install(monkeypatch, h)
     OpenCodeClient("http://127.0.0.1:4599", "pw").create_session(
-        "t", {"id": "m", "providerID": "opencode", "modelID": "m"}, "D:/opencode")
+        "t", {"id": "m", "providerID": "opencode", "modelID": "m"}, "D:/kb-platform")
     assert seen["auth"].startswith("Basic ")
     assert base64.b64decode(seen["auth"].split()[1]).decode() == "opencode:pw"
 

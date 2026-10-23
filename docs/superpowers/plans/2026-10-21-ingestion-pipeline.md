@@ -57,7 +57,7 @@
 ## 文件结构
 
 ```
-D:\opencode\
+D:\kb-platform\
 ├── config.toml                     配置（监控根、轮询间隔、路径、限流）
 ├── kbplatform\                    本计划新建的包（不叫 platform —— 与标准库冲突）
 │   ├── __init__.py
@@ -146,7 +146,7 @@ D:\opencode\
 - [ ] **Step 1: 初始化 git 仓库并安装依赖**
 
 ```bash
-cd D:\opencode
+cd D:\kb-platform
 git init
 git config user.email "admin@local"
 git config user.name "platform-admin"
@@ -230,7 +230,7 @@ def test_load_config_reads_monitor_roots_and_paths(tmp_path):
         'poll_interval_sec = 30\n'
         'scan_qps = 20\n\n'
         '[paths]\n'
-        'data_dir = "D:/opencode/kb/data"\n\n'
+        'data_dir = "D:/kb-platform/kb/data"\n\n'
         '[drives]\n'
         '"W:" = "\\\\\\\\192.0.2.19\\\\信息化管理"\n',
         encoding="utf-8")
@@ -238,7 +238,7 @@ def test_load_config_reads_monitor_roots_and_paths(tmp_path):
     assert c.monitor_roots == ["\\\\192.0.2.19\\信息化管理\\AI知识库"]
     assert c.poll_interval_sec == 30
     assert c.scan_qps == 20
-    assert c.data_dir == "D:/opencode/kb/data"
+    assert c.data_dir == "D:/kb-platform/kb/data"
     assert c.drive_map == {"W:": "\\\\192.0.2.19\\信息化管理"}
     assert c.db_path.endswith("kb.db")
     assert c.fts_path.endswith("fts.db")
@@ -256,7 +256,7 @@ def test_load_config_applies_defaults(tmp_path):
 - [ ] **Step 4: 运行测试确认失败**
 
 ```bash
-cd D:\opencode
+cd D:\kb-platform
 python -m pytest kbplatform/tests/test_paths.py kbplatform/tests/test_config.py -v
 ```
 
@@ -282,7 +282,7 @@ def norm_unc(path: str) -> str:
 
 `path_key` 逻辑：`norm_unc(path).lower()`。
 
-`kbplatform/config.py` 的 `Config` 字段与默认值见上方 Interfaces 块；`load_config` 用标准库 `tomllib` 读 `[monitor]` / `[paths]` / `[drives]` / `[runtime]` 四段，缺省值：`poll_interval_sec=60`、`scan_qps=20`、`max_workers=1`、`data_dir="D:/opencode/kb/data"`。`db_path` / `fts_path` / `vector_dir` 在 `__post_init__` 里由 `data_dir` 派生（`kb.db` / `fts.db` / `vectors`）。
+`kbplatform/config.py` 的 `Config` 字段与默认值见上方 Interfaces 块；`load_config` 用标准库 `tomllib` 读 `[monitor]` / `[paths]` / `[drives]` / `[runtime]` 四段，缺省值：`poll_interval_sec=60`、`scan_qps=20`、`max_workers=1`、`data_dir="D:/kb-platform/kb/data"`。`db_path` / `fts_path` / `vector_dir` 在 `__post_init__` 里由 `data_dir` 派生（`kb.db` / `fts.db` / `vectors`）。
 
 `config.toml`：
 
@@ -294,7 +294,7 @@ poll_interval_sec = 60
 scan_qps = 20
 
 [paths]
-data_dir = "D:/opencode/kb/data"
+data_dir = "D:/kb-platform/kb/data"
 
 [drives]
 "W:" = "\\\\192.0.2.19\\信息化管理"
@@ -333,7 +333,7 @@ _probe/
 - [ ] **Step 6: 运行测试确认通过**
 
 ```bash
-cd D:\opencode
+cd D:\kb-platform
 python -m pytest kbplatform/tests/test_paths.py kbplatform/tests/test_config.py -v
 ```
 
@@ -422,7 +422,7 @@ def test_migrate_paths_is_idempotent(tmp_path):
 - [ ] **Step 2: 运行测试确认失败**
 
 ```bash
-cd D:\opencode
+cd D:\kb-platform
 python -m pytest kbplatform/tests/test_db.py -v
 ```
 
@@ -466,7 +466,7 @@ Expected: PASS，4 个用例
 - [ ] **Step 5: 对真实库执行迁移并核对**
 
 ```bash
-python -c "import sys; sys.path.insert(0,'.'); from kbplatform.db import connect, migrate_paths; c=connect('D:/opencode/kb/data/kb.db'); print('rewritten:', migrate_paths(c, {'W:':'\\\\\\\\192.0.2.19\\\\信息化管理'}))"
+python -c "import sys; sys.path.insert(0,'.'); from kbplatform.db import connect, migrate_paths; c=connect('D:/kb-platform/kb/data/kb.db'); print('rewritten:', migrate_paths(c, {'W:':'\\\\\\\\192.0.2.19\\\\信息化管理'}))"
 ```
 
 Expected: 输出 `rewritten: 4`（现有 1 份文档：files 1 行 + chunks 4 行）
@@ -635,7 +635,7 @@ Expected: PASS，7 个用例
 - [ ] **Step 5: 对真实 chunk 验证索引体积与查询延迟**
 
 ```bash
-python -c "import sys,time,sqlite3; sys.path.insert(0,'.'); from kbplatform.fts import build_index, search; c=sqlite3.connect('D:/opencode/kb/data/kb.db'); rows=c.execute('SELECT id,text FROM chunks').fetchall(); t=time.time(); build_index('D:/opencode/kb/data/fts.db', rows); print('build %.2fs'%(time.time()-t)); t=time.time(); print(search('D:/opencode/kb/data/fts.db','信创',5)); print('query %.1fms'%((time.time()-t)*1000))"
+python -c "import sys,time,sqlite3; sys.path.insert(0,'.'); from kbplatform.fts import build_index, search; c=sqlite3.connect('D:/kb-platform/kb/data/kb.db'); rows=c.execute('SELECT id,text FROM chunks').fetchall(); t=time.time(); build_index('D:/kb-platform/kb/data/fts.db', rows); print('build %.2fs'%(time.time()-t)); t=time.time(); print(search('D:/kb-platform/kb/data/fts.db','信创',5)); print('query %.1fms'%((time.time()-t)*1000))"
 ```
 
 Expected: build < 0.1s；`信创` 命中 chunk（当前样本含"信创"）；query < 50ms
@@ -1559,7 +1559,7 @@ Expected: `{'indexed': 1, 'extracted': 1, ...}`（对应当前 `W:\AI知识库` 
 - [ ] **Step 6: 核对结果**
 
 ```bash
-python -c "import sqlite3; c=sqlite3.connect('D:/opencode/kb/data/kb.db'); print('catalog:', c.execute('SELECT name, status, tier1_done, tier2_done, chunk_count, kp_count FROM catalog').fetchall()); print('knowledge:', c.execute('SELECT COUNT(*) FROM knowledge').fetchone()[0]); print('nodes:', c.execute('SELECT COUNT(*) FROM nodes').fetchone()[0]); print('edges:', c.execute('SELECT COUNT(*) FROM edges').fetchone()[0])"
+python -c "import sqlite3; c=sqlite3.connect('D:/kb-platform/kb/data/kb.db'); print('catalog:', c.execute('SELECT name, status, tier1_done, tier2_done, chunk_count, kp_count FROM catalog').fetchall()); print('knowledge:', c.execute('SELECT COUNT(*) FROM knowledge').fetchone()[0]); print('nodes:', c.execute('SELECT COUNT(*) FROM nodes').fetchone()[0]); print('edges:', c.execute('SELECT COUNT(*) FROM edges').fetchone()[0])"
 ```
 
 Expected: catalog 有 1 行且 `status='done'`、`tier1_done=1`、`tier2_done=1`；knowledge ≥ 1；nodes ≥ 1；edges ≥ 0
@@ -1696,7 +1696,7 @@ git commit -m "feat: legacy format conversion and OCR pipeline"
 本计划完成时，以下全部成立：
 
 ```bash
-cd D:\opencode
+cd D:\kb-platform
 python -m pytest kbplatform/tests/ -v          # 全部通过
 python kb\test_qa.py                           # 现有问答仍工作
 ```

@@ -146,7 +146,7 @@ if __name__ == "__main__":
     sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser()
     ap.add_argument("root")
-    ap.add_argument("--db", default="D:/opencode/kb/data/kb.db")
+    ap.add_argument("--db", default="D:/kb-platform/kb/data/kb.db")
     ap.add_argument("--model", default=llm.GEN_MODEL)
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--no-canon", action="store_true")

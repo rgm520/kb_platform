@@ -6,7 +6,7 @@
 #
 # 由 install-task.ps1 注册的计划任务调用。
 
-$root = "D:\opencode"
+$root = "D:\kb-platform"
 $py = "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe"
 $logs = "$root\kb\logs"
 New-Item -ItemType Directory -Path $logs -Force | Out-Null

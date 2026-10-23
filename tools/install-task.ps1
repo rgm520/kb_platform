@@ -1,8 +1,8 @@
 ﻿# 注册知识库平台为 Windows 计划任务（开机自启 + 失败自动重启）
 #
 # 用法：
-#   powershell -NoProfile -ExecutionPolicy Bypass -File D:\opencode\tools\install-task.ps1
-#   powershell -NoProfile -ExecutionPolicy Bypass -File D:\opencode\tools\install-task.ps1 -Uninstall
+#   powershell -NoProfile -ExecutionPolicy Bypass -File D:\kb-platform\tools\install-task.ps1
+#   powershell -NoProfile -ExecutionPolicy Bypass -File D:\kb-platform\tools\install-task.ps1 -Uninstall
 #
 # 为什么用计划任务而不是 Start-Process：
 #   Start-Process 起的进程，父 shell 一被回收（会话结束 / 终端关闭 / 命令超时被杀）
@@ -15,7 +15,7 @@
 param([switch]$Uninstall)
 
 $TaskName = "OpenCode-KB-Platform"
-$root = "D:\opencode"
+$root = "D:\kb-platform"
 $script = "$root\tools\start-platform.ps1"
 
 if ($Uninstall) {

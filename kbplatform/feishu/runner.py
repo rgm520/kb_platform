@@ -282,7 +282,7 @@ def read_server_info(root: str) -> dict | None:
         return None
 
 
-def run_once(config_path: str = "D:/opencode/config.toml") -> FeishuBot | None:
+def run_once(config_path: str = "D:/kb-platform/config.toml") -> FeishuBot | None:
     """装配并启动机器人。返回 None 表示配置不足（调用方应当退出）。"""
     cfg = load_feishu_config(config_path)
     if cfg is None:
@@ -379,8 +379,8 @@ def setup_logging(log_dir: str | None = None) -> None:
 
 
 def main() -> int:
-    setup_logging(os.path.join("D:/opencode", "kb", "logs"))
-    config_path = sys.argv[1] if len(sys.argv) > 1 else "D:/opencode/config.toml"
+    setup_logging(os.path.join("D:/kb-platform", "kb", "logs"))
+    config_path = sys.argv[1] if len(sys.argv) > 1 else "D:/kb-platform/config.toml"
     try:
         bot = run_once(config_path)
     except Exception:

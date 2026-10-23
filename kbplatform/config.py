@@ -12,7 +12,7 @@ class Config:
     poll_interval_sec: int = 60
     scan_qps: int = 20
     max_workers: int = 1
-    data_dir: str = "D:/opencode/kb/data"
+    data_dir: str = "D:/kb-platform/kb/data"
     db_path: str = ""
     fts_path: str = ""
     vector_dir: str = ""
@@ -52,7 +52,7 @@ def load_config(path: str) -> Config:
         poll_interval_sec=int(mon.get("poll_interval_sec", 60)),
         scan_qps=int(mon.get("scan_qps", 20)),
         max_workers=int(runtime.get("max_workers", 1)),
-        data_dir=paths.get("data_dir", "D:/opencode/kb/data"),
+        data_dir=paths.get("data_dir", "D:/kb-platform/kb/data"),
         drive_map=drives,
         share_names=list(shares.get("names", [])),
         llm_model=str(models.get("llm", "qwen3.5-9b-64k")),

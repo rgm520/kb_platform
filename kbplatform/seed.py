@@ -33,8 +33,8 @@ ADMIN_USER = os.environ.get("KB_ADMIN_USER", "admin")
 ADMIN_PASSWORD = os.environ.get("KB_ADMIN_PASSWORD") or secrets.token_urlsafe(12)
 
 
-def seed(db_path: str = "D:/opencode/kb/data/kb.db",
-         config_path: str = "D:/opencode/config.toml",
+def seed(db_path: str = "D:/kb-platform/kb/data/kb.db",
+         config_path: str = "D:/kb-platform/config.toml",
          create_admin: bool = True) -> dict:
     conn = init_db(db_path)
     out = {}
@@ -77,5 +77,5 @@ def seed(db_path: str = "D:/opencode/kb/data/kb.db",
 
 if __name__ == "__main__":
     sys.stdout.reconfigure(encoding="utf-8")
-    cfg = load_config(sys.argv[1] if len(sys.argv) > 1 else "D:/opencode/config.toml")
+    cfg = load_config(sys.argv[1] if len(sys.argv) > 1 else "D:/kb-platform/config.toml")
     print(seed(cfg.db_path))

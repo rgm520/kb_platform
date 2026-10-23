@@ -8,7 +8,7 @@
   平台没有，于是掉了。
 
 用法：
-    python -m kbplatform.supervisor D:/opencode/config.toml
+    python -m kbplatform.supervisor D:/kb-platform/config.toml
 
 进程模型：
     supervisor  (长驻，由计划任务拉起)
@@ -163,7 +163,7 @@ def acquire_single_instance_lock(lock_path: str):
 
 
 def main() -> int:
-    cfg_path = sys.argv[1] if len(sys.argv) > 1 else "D:/opencode/config.toml"
+    cfg_path = sys.argv[1] if len(sys.argv) > 1 else "D:/kb-platform/config.toml"
     cfg = load_config(cfg_path)
     root = os.path.dirname(os.path.abspath(cfg_path))
     log_dir = os.path.join(root, "kb", "logs")

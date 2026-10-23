@@ -11,9 +11,9 @@
 #   * 刚重启过 120 秒内不再动（避免反复重启）
 #   * 清理时只杀平台自己的进程（按命令行特征），不碰飞书机器人等其它服务
 #
-# 用法：powershell -NoProfile -ExecutionPolicy Bypass -File D:\opencode\tools\watchdog.ps1
+# 用法：powershell -NoProfile -ExecutionPolicy Bypass -File D:\kb-platform\tools\watchdog.ps1
 
-$root = "D:\opencode"
+$root = "D:\kb-platform"
 $TaskName = "OpenCode-KB-Platform"
 $log = "$root\kb\logs\watchdog.log"
 $stateFile = "$root\kb\logs\watchdog-state.json"
@@ -44,7 +44,7 @@ try {
   $st.lastRestart = [double]$st.lastRestart
 
   if ($sup.Count -gt 0) {
-    if ($st.misses -ne 0) { Log "监督进程已恢复，���清零连续缺失计数" }
+    if ($st.misses -ne 0) { Log "监督进程已恢复，并清零连续缺失计数" }
     $st.misses = 0
     $st | ConvertTo-Json | Set-Content -Path $stateFile -Encoding UTF8
     exit 0

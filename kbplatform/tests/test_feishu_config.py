@@ -34,14 +34,14 @@ def test_load_reads_secret_from_secrets_toml(tmp_path, monkeypatch):
     monkeypatch.delenv("FEISHU_APP_ID", raising=False)
     monkeypatch.delenv("FEISHU_APP_SECRET", raising=False)
     (tmp_path / "config.toml").write_text(
-        '[feishu]\nenabled = true\nworkspace = "D:/opencode"\n', encoding="utf-8")
+        '[feishu]\nenabled = true\nworkspace = "D:/kb-platform"\n', encoding="utf-8")
     (tmp_path / "secrets.toml").write_text(
         '[feishu]\napp_id = "cli_x"\napp_secret = "s3cr3t"\n', encoding="utf-8")
     cfg = load_feishu_config(str(tmp_path / "config.toml"),
                              str(tmp_path / "secrets.toml"))
     assert cfg is not None
     assert cfg.app_id == "cli_x" and cfg.app_secret == "s3cr3t"
-    assert cfg.workspace == "D:/opencode"
+    assert cfg.workspace == "D:/kb-platform"
 
 
 def test_env_vars_take_precedence_over_secrets_file(tmp_path, monkeypatch):
@@ -60,7 +60,7 @@ def test_defaults_match_spec(tmp_path, monkeypatch):
     monkeypatch.setenv("FEISHU_APP_SECRET", "s")
     (tmp_path / "config.toml").write_text("[feishu]\nenabled = true\n", encoding="utf-8")
     cfg = load_feishu_config(str(tmp_path / "config.toml"))
-    assert cfg.workspace == "D:/opencode"
+    assert cfg.workspace == "D:/kb-platform"
     assert cfg.opencode_port == 4599
     assert cfg.cloud_model == "opencode/minimax-m3.1-flash-free"
     assert cfg.local_model == "ollama/qwen3.5-9b-64k:latest"

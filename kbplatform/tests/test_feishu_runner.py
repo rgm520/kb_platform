@@ -102,14 +102,14 @@ def test_run_once_returns_none_when_disabled(tmp_path, monkeypatch):
 
 def test_opencode_server_rejects_missing_cli():
     srv = OpenCodeServer(cli_path="D:/不存在/opencode-cli.exe", port=4599,
-                         workdir="D:/opencode")
+                         workdir="D:/kb-platform")
     with pytest.raises(FileNotFoundError):
         srv.start()
 
 
 def test_opencode_server_stop_is_safe_when_not_started():
     srv = OpenCodeServer(cli_path="D:/不存在/opencode-cli.exe", port=4599,
-                         workdir="D:/opencode")
+                         workdir="D:/kb-platform")
     srv.stop()
     assert srv.is_alive() is False
 

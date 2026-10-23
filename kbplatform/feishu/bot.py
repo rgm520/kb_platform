@@ -87,7 +87,7 @@ def strip_mentions(text: str) -> str:
 
 
 def build_directive(restricted: list[str] | None = None,
-                    workspace: str = "D:/opencode") -> str:
+                    workspace: str = "D:/kb-platform") -> str:
     """每条指令前面挂的使用说明。
 
     agent 需要知道：知识库怎么查、哪些目录不能直接读。

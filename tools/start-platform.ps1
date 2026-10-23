@@ -1,11 +1,11 @@
 ﻿# 启动知识库平台（Web 服务 + 摄入流水线），由监督进程托管并自动重启
 #
 # 用法：
-#   powershell -NoProfile -ExecutionPolicy Bypass -File D:\opencode\tools\start-platform.ps1
-#   powershell -NoProfile -ExecutionPolicy Bypass -File D:\opencode\tools\start-platform.ps1 -Stop
+#   powershell -NoProfile -ExecutionPolicy Bypass -File D:\kb-platform\tools\start-platform.ps1
+#   powershell -NoProfile -ExecutionPolicy Bypass -File D:\kb-platform\tools\start-platform.ps1 -Stop
 #
 # 开机自启（推荐，注册计划任务后即使无人登录也会拉起）：
-#   powershell -NoProfile -ExecutionPolicy Bypass -File D:\opencode\tools\install-task.ps1
+#   powershell -NoProfile -ExecutionPolicy Bypass -File D:\kb-platform\tools\install-task.ps1
 #
 # 说明：监督进程（kbplatform.supervisor）持有两个子进程，任何一个挂掉都会被
 # 自动拉起；健康检查连续失败 3 次也会重启 Web 服务。
@@ -13,7 +13,7 @@
 param([switch]$Stop)
 
 $py = "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe"
-$root = "D:\opencode"
+$root = "D:\kb-platform"
 $logs = "$root\kb\logs"
 New-Item -ItemType Directory -Path $logs -Force | Out-Null
 

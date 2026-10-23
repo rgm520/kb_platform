@@ -1,10 +1,10 @@
 import sys, os, json
-sys.path.insert(0, "D:/opencode")
+sys.path.insert(0, "D:/kb-platform")
 sys.stdout.reconfigure(encoding="utf-8")
 from kb.store import Store
 from kb.query import Retriever
 
-DB = "D:/opencode/kb/data/kb.db"
+DB = "D:/kb-platform/kb/data/kb.db"
 WIKI = sys.argv[1]
 st = Store(DB)
 r = Retriever(DB, wiki_dir=WIKI)

@@ -184,7 +184,7 @@ def build(store, out_dir):
 if __name__ == "__main__":
     sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser()
-    ap.add_argument("--db", default="D:/opencode/kb/data/kb.db")
+    ap.add_argument("--db", default="D:/kb-platform/kb/data/kb.db")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     st = Store(a.db)

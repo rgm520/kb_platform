@@ -80,7 +80,7 @@ def build_permissions(restricted_paths: list[str],
     顺序很重要：opencode 取**最后一条匹配**的规则，所以宽泛在前、具体在后。
     """
     perms: list[dict] = [
-        # 框架级强控制：Location（D:/opencode）之外的路径一律不让读/改
+        # 框架级强控制：Location（D:/kb-platform）之外的路径一律不让读/改
         {"action": "external_directory", "resource": "*", "effect": "deny"},
     ]
 

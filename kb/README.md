@@ -25,19 +25,19 @@
 
 ```powershell
 $py = "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe"
-cd D:\opencode
+cd D:\kb-platform
 
 # 1) 摄取（增量：内容未变的文件自动跳过）
-& $py -m kb.ingest "W:\AI知识库" --db D:/opencode/kb/data/kb.db
+& $py -m kb.ingest "W:\AI知识库" --db D:/kb-platform/kb/data/kb.db
 
 # 强制重跑
-& $py -m kb.ingest "W:\AI知识库" --db D:/opencode/kb/data/kb.db --force
+& $py -m kb.ingest "W:\AI知识库" --db D:/kb-platform/kb/data/kb.db --force
 
 # 2) 导出 Wiki（写到 NAS 的 _kb/ 目录）
-& $py kb\export_wiki.py --db D:/opencode/kb/data/kb.db --out "W:\AI知识库\_kb"
+& $py kb\export_wiki.py --db D:/kb-platform/kb/data/kb.db --out "W:\AI知识库\_kb"
 
 # 3) 问答
-& $py -m kb.query "三级及以下子企业能不能自建数据中心机房？" --db D:/opencode/kb/data/kb.db --wiki "W:\AI知识库\_kb\wiki"
+& $py -m kb.query "三级及以下子企业能不能自建数据中心机房？" --db D:/kb-platform/kb/data/kb.db --wiki "W:\AI知识库\_kb\wiki"
 ```
 
 ---

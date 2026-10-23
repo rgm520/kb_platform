@@ -150,7 +150,7 @@ if __name__ == "__main__":
     import sys
     sys.stdout.reconfigure(encoding="utf-8")
     from kbplatform.config import load_config
-    cfg_path = sys.argv[1] if len(sys.argv) > 1 else "D:/opencode/config.toml"
+    cfg_path = sys.argv[1] if len(sys.argv) > 1 else "D:/kb-platform/config.toml"
     p = Pipeline(load_config(cfg_path))
     if "--once" in sys.argv:
         print(p.run_once())

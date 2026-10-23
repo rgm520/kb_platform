@@ -12,10 +12,10 @@
 
 ```powershell
 $py = "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe"
-cd D:\opencode
+cd D:\kb-platform
 
 # 前台跑（看日志）
-& $py -m kbplatform.feishu.runner D:\opencode\config.toml
+& $py -m kbplatform.feishu.runner D:\kb-platform\config.toml
 ```
 
 日志默认写到 `kb\logs\feishu-bot.log`（用任务计划跑时）。
@@ -40,7 +40,7 @@ cd D:\opencode
 
 ## 配置
 
-### 凭据（`D:\opencode\secrets.toml`，已进 .gitignore）
+### 凭据（`D:\kb-platform\secrets.toml`，已进 .gitignore）
 
 ```toml
 [feishu]
@@ -51,12 +51,12 @@ app_secret = "xxxx"
 也可用环境变量 `FEISHU_APP_ID` / `FEISHU_APP_SECRET`（优先级更高）。
 **App Secret 已经在本次接入过程中以明文出现过，建议在开发者后台重置一次。**
 
-### 非敏感配置（`D:\opencode\config.toml` 的 `[feishu]` 段）
+### 非敏感配置（`D:\kb-platform\config.toml` 的 `[feishu]` 段）
 
 | 键 | 默认 | 说明 |
 |---|---|---|
 | `enabled` | — | 必须为 `true` |
-| `workspace` | `D:/opencode` | agent 的工作目录 |
+| `workspace` | `D:/kb-platform` | agent 的工作目录 |
 | `opencode_port` | 4599 | 机器人自己拉起的 opencode serve 端口 |
 | `opencode_cli` | 空 | 留空则自动扫描桌面端安装目录 |
 | `cloud_model` | `opencode/minimax-m3.1-flash-free` | 普通用户用的模型 |
@@ -71,7 +71,7 @@ app_secret = "xxxx"
 ## 开机自启（Windows 任务计划）
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File D:\opencode\tools\install-feishu-task.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File D:\kb-platform\tools\install-feishu-task.ps1
 ```
 
 注册计划任务 `OpenCode-Feishu-Bot`：
@@ -79,7 +79,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File D:\opencode\tools\install-fe
 | 项 | 值 |
 |---|---|
 | 触发器 | 登录时 |
-| 操作 | `powershell -File D:\opencode\tools\start-feishu-bot.ps1` |
+| 操作 | `powershell -File D:\kb-platform\tools\start-feishu-bot.ps1` |
 | 条件 | **以登录用户身份运行** |
 
 必须用登录用户：U:/V:/W:/X:/Y: 是持久盘符映射（注册表 `HKCU\Network`），
@@ -149,8 +149,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File D:\opencode\tools\install-fe
 查看实时日志：
 
 ```powershell
-Get-Content D:\opencode\kb\logs\feishu-bot.log -Wait
-Get-Content D:\opencode\kb\logs\feishu-bot.log.err -Wait
+Get-Content D:\kb-platform\kb\logs\feishu-bot.log -Wait
+Get-Content D:\kb-platform\kb\logs\feishu-bot.log.err -Wait
 ```
 
 ---

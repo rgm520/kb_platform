@@ -257,7 +257,7 @@ def main():
     sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser()
     ap.add_argument("question")
-    ap.add_argument("--db", default="D:/opencode/kb/data/kb.db")
+    ap.add_argument("--db", default="D:/kb-platform/kb/data/kb.db")
     ap.add_argument("--wiki", default=None, help="wiki 目录（人工校正层，参与检索）")
     ap.add_argument("--topk", type=int, default=8)
     ap.add_argument("--no-graph", action="store_true")

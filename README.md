@@ -10,13 +10,13 @@
 
 ```powershell
 # 启动（Web 服务 + 摄入流水线）
-powershell -NoProfile -ExecutionPolicy Bypass -File D:\opencode\tools\start-platform.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File D:\kb-platform\tools\start-platform.ps1
 
 # 停止
-powershell -NoProfile -ExecutionPolicy Bypass -File D:\opencode\tools\start-platform.ps1 -Stop
+powershell -NoProfile -ExecutionPolicy Bypass -File D:\kb-platform\tools\start-platform.ps1 -Stop
 
 # 只重启 Web 服务
-powershell -NoProfile -ExecutionPolicy Bypass -File D:\opencode\tools\restart-service.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File D:\kb-platform\tools\restart-service.ps1
 ```
 
 | 地址 | 说明 |
@@ -89,16 +89,16 @@ job object 里，shell 一被回收（会话结束 / 终端关闭 / 命令超时
 
 `powershell
 # 注册/启动（首次部署或改配置后）
-powershell -NoProfile -ExecutionPolicy Bypass -File D:\opencode\tools\install-task.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File D:\kb-platform\tools\install-task.ps1
 
 # 手动启停
-powershell -NoProfile -ExecutionPolicy Bypass -File D:\opencode\tools\start-platform.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File D:\opencode\tools\start-platform.ps1 -Stop
+powershell -NoProfile -ExecutionPolicy Bypass -File D:\kb-platform\tools\start-platform.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File D:\kb-platform\tools\start-platform.ps1 -Stop
 
 # 看状态
 Get-ScheduledTask | Where-Object TaskName -like 'OpenCode-KB*' | Get-ScheduledTaskInfo
-Get-Content D:\opencode\kb\logs\supervisor-heartbeat.json    # 心跳与重启次数
-Get-Content D:\opencode\kb\logs\watchdog.log -Tail 20          # 看门狗记录
+Get-Content D:\kb-platform\kb\logs\supervisor-heartbeat.json    # 心跳与重启次数
+Get-Content D:\kb-platform\kb\logs\watchdog.log -Tail 20          # 看门狗记录
 `
 
 > ⚠️ Task Scheduler 自带的「失败后重启」对**外部强杀**不生效（实测
@@ -107,7 +107,7 @@ Get-Content D:\opencode\kb\logs\watchdog.log -Tail 20          # 看门狗记录
 ## 目录结构
 
 ```
-D:\opencode\
+D:\kb-platform\
 ├── config.toml                监控根、轮询间隔、路径、限流
 ├── kb\                        引擎层（已验证：解析/分块/提炼/图谱/检索/问答）
 ├── kbplatform\                平台层

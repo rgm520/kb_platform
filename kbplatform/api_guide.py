@@ -473,9 +473,9 @@ GET $API/graph/subgraph?node=<id>&hops=2&types=entity,knowledge_point   中心�
 | 任务 A | `OpenCode-KB-Platform` —— 登录时启动，动作是 `tools/run-supervisor.ps1` |
 | 任务 B | `OpenCode-KB-Watchdog` —— 每 1 分钟检查，监督进程不在就拉起 |
 | 监听端口 | **8000**（Web + 对外 API 同端口） |
-| 根目录 | `{dp.get("root", "D:/opencode")}` |
-| 数据目录 | `{dp.get("data_dir", "D:/opencode/kb/data")}`（数据库 / FTS 索引 / 向量） |
-| 日志目录 | `{dp.get("log_dir", "D:/opencode/kb/logs")}` |
+| 根目录 | `{dp.get("root", "D:/kb-platform")}` |
+| 数据目录 | `{dp.get("data_dir", "D:/kb-platform/kb/data")}`（数据库 / FTS 索引 / 向量） |
+| 日志目录 | `{dp.get("log_dir", "D:/kb-platform/kb/logs")}` |
 | 配置文件 | `config.toml`（监控目录、轮询间隔、路径、限流、对外地址） |
 | 数据库 | SQLite（`kb.db` 平台库 + `fts.db` 全文索引 + `vectors/` 向量） |
 | 大模型 | Ollama（本机 `qwen3.5-9b-64k` / `qwen3.5-9b-32k` / `qwen3.5:9b`；远端 `192.0.2.77` `qwen3.5:9b` 作为可选冗余） |
@@ -506,17 +506,17 @@ NAS 监控目录  →  ①扫描建目录索引  →  ②分块 + 全文索引 +
 
 ```powershell
 # 启停
-powershell -NoProfile -ExecutionPolicy Bypass -File D:\\opencode\\tools\\start-platform.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File D:\\opencode\\tools\\start-platform.ps1 -Stop
+powershell -NoProfile -ExecutionPolicy Bypass -File D:\\kb-platform\\tools\\start-platform.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File D:\\kb-platform\\tools\\start-platform.ps1 -Stop
 
 # 重新注册计划任务（改了配置或脚本后）
-powershell -NoProfile -ExecutionPolicy Bypass -File D:\\opencode\\tools\\install-task.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File D:\\kb-platform\\tools\\install-task.ps1
 
 # 看状态
 Get-ScheduledTask | Where-Object TaskName -like 'OpenCode-KB*' | Get-ScheduledTaskInfo
-Get-Content D:\\opencode\\kb\\logs\\supervisor-heartbeat.json   # 心跳与重启次数
-Get-Content D:\\opencode\\kb\\logs\\watchdog.log -Tail 20         # 看门狗记录
-Get-Content D:\\opencode\\kb\\logs\\supervisor.out.log -Tail 20   # 监督进程日志
+Get-Content D:\\kb-platform\\kb\\logs\\supervisor-heartbeat.json   # 心跳与重启次数
+Get-Content D:\\kb-platform\\kb\\logs\\watchdog.log -Tail 20         # 看门狗记录
+Get-Content D:\\kb-platform\\kb\\logs\\supervisor.out.log -Tail 20   # 监督进程日志
 ```
 
 ### 关键约束（运维须知）
@@ -578,7 +578,7 @@ curl -s "$ZB_KB_BASE_URL/documents/<document_id>/knowledge" -H "Authorization: B
 """
 
 
-def build_deploy_info(root: str = "D:/opencode") -> dict:
+def build_deploy_info(root: str = "D:/kb-platform") -> dict:
     return {
         "root": root,
         "data_dir": root + "/kb/data",

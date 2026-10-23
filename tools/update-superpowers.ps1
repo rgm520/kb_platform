@@ -5,7 +5,7 @@
 # 解压后覆盖 ~/.config/opencode/superpowers。
 #
 # 用法：
-#   powershell -NoProfile -ExecutionPolicy Bypass -File D:\opencode\tools\update-superpowers.ps1
+#   powershell -NoProfile -ExecutionPolicy Bypass -File D:\kb-platform\tools\update-superpowers.ps1
 
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
