@@ -418,7 +418,8 @@ def make_app(config_path: str = "D:/opencode/config.toml") -> FastAPI:
         for h in hits:
             if req.share and h.share != req.share:
                 continue
-            results.append({"chunk_id": h.chunk_id, "file": os.path.basename(h.file_path),
+            results.append({"chunk_id": h.chunk_id, "document_id": h.document_id,
+                            "file": os.path.basename(h.file_path),
                             "path": h.file_path, "locator": h.locator,
                             "snippet": "" if h.restricted else h.text[:200],
                             "score": round(h.score, 5), "matched_by": h.matched_by,

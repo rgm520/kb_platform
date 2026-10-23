@@ -15,20 +15,38 @@ from typing import Iterable
 
 CJK = re.compile(r"[一-鿿]")
 WORD = re.compile(r"[A-Za-z0-9][A-Za-z0-9_\-]*")
+# 词边界：空白 + 中英文标点（保留 `_` `-` 以免切碎 chunk_id 这类标识符）
+_SPLIT = re.compile(
+    r"[\s\u3000-\u303f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65"
+    r"\x21-\x2c\x2e-\x2f\x3a-\x40\x5b-\x5e\x60\x7b-\x7e]+")
 
 
 def tokenize(text: str) -> list[str]:
     """中文：单字 + 相邻二元组；英文/数字：按词。全部小写。
 
-    与 kb/query.py 的分词保持一致，只是这里额外支持 needs_vector_fallback。
+    必须**按词边界分段**再取二元组。直接在整串上取相邻二字会拼出跨词的
+    假二元组：`任职资格 版本变更` 里的 `格版` 在任何文档中都不存在，
+    AND 匹配必然落空——多词查询的 FTS 召回会整个变成 0
+    （2026-10-23 实测：`数据机房 审批` 只有向量通道有结果）。
     """
     if not text:
         return []
-    toks = [m.group().lower() for m in WORD.finditer(text)]
-    cj = CJK.findall(text)
-    toks.extend(cj)
-    toks.extend(a + b for a, b in zip(cj, cj[1:]))
-    return toks
+    toks: list[str] = []
+    for seg in _SPLIT.split(text):
+        if not seg:
+            continue
+        toks.extend(m.group().lower() for m in WORD.finditer(seg))
+        cj = CJK.findall(seg)
+        toks.extend(cj)
+        toks.extend(a + b for a, b in zip(cj, cj[1:]))
+    # 去重（保持顺序）：索引串更短，查询里重复词也不会被算成多个 AND 条件
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in toks:
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
 
 
 def _cjk_only(tokens: list[str]) -> bool:

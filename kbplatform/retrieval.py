@@ -158,8 +158,14 @@ class Retriever:
             v_ids = [i for i in v_ids if i in allowed]
 
         ranked_lists = [k_ids, v_ids]
+        g_ids: list[int] = []
         if use_graph:
-            ranked_lists.append(self._graph(k_ids + v_ids))
+            g_ids = self._graph(k_ids + v_ids)
+            # 图谱结果同样必须过 ACL：种子在范围内，扩展出的邻居未必在。
+            # 漏掉这一步就是越权路径（chunk_meta 只 join catalog，不查 scope）。
+            if allowed is not None:
+                g_ids = [i for i in g_ids if i in allowed]
+            ranked_lists.append(g_ids)
         if wiki_ids:
             ranked_lists.append(wiki_ids)
 
@@ -180,7 +186,7 @@ class Retriever:
         wiki_meta = self._wiki_meta([c for c, _ in scored if c >= 1_000_000])
 
         matched = {}
-        for name, ids in (("keyword", k_ids), ("vector", v_ids)):
+        for name, ids in (("keyword", k_ids), ("vector", v_ids), ("graph", g_ids)):
             for i in ids:
                 matched.setdefault(i, []).append(name)
         for cid in wiki_ids:
@@ -204,7 +210,7 @@ class Retriever:
                             m.get("document_id")))
 
         return hits, {"keyword": len(k_ids), "vector": len(v_ids),
-                      "wiki": len(wiki_ids), "graph": 0}
+                      "wiki": len(wiki_ids), "graph": len(g_ids)}
 
     def _wiki_meta(self, ids: list[int]) -> dict[int, dict]:
         if not ids:

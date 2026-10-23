@@ -25,6 +25,7 @@ class VectorStore:
         self.vec_path = self.dir / "vectors.f16"
         self.ids_path = self.dir / "vectors.ids.json"
         self._ids: list[int] = self._load_ids()
+        self._ids_stat = self._stat_key()
 
     # ------------------------------------------------------------ 持久化
     def _load_ids(self) -> list[int]:
@@ -35,11 +36,33 @@ class VectorStore:
                 return []
         return []
 
+    def _stat_key(self) -> tuple[int, int] | None:
+        try:
+            st = self.ids_path.stat()
+        except OSError:
+            return None
+        return (st.st_mtime_ns, st.st_size)
+
+    def _refresh(self) -> None:
+        """ids 文件变了就重载。
+
+        入库是**独立进程**（kbplatform.pipeline），Web 进程里这个实例在启动时
+        只加载一次。不重载的话，新文档的向量要重启 Web 才可见——用户看到的是
+        「上传了但语义搜不到」（2026-10-23 实测：新 chunk 在 /search 里
+        matched_by 为空，只能靠图谱通道蹭进来）。
+        """
+        key = self._stat_key()
+        if key != self._ids_stat:
+            self._ids = self._load_ids()
+            self._ids_stat = key
+
     def _save_ids(self) -> None:
         self.ids_path.write_text(json.dumps(self._ids), encoding="utf-8")
+        self._ids_stat = self._stat_key()
 
     # ------------------------------------------------------------ 写入
     def add(self, ids: list[int], vectors: list[list[float]]) -> None:
+        self._refresh()          # 先并上其它进程已写入的行，避免覆盖
         if not ids:
             return
         if len(ids) != len(vectors):
@@ -69,6 +92,7 @@ class VectorStore:
 
     def search(self, q: list[float], topk: int = 20) -> list[tuple[int, float]]:
         """返回 [(chunk_id, 余弦相似度)]，按相似度降序。"""
+        self._refresh()
         M = self._matrix()
         if M.size == 0:
             return []
@@ -87,6 +111,7 @@ class VectorStore:
         return [(cid, float(sims[row])) for row, cid in live[:topk]]
 
     def remove(self, ids: Iterable[int]) -> None:
+        self._refresh()
         dead = {int(i) for i in ids}
         for i, cid in enumerate(self._ids):
             if cid in dead:
@@ -94,9 +119,11 @@ class VectorStore:
         self._save_ids()
 
     def count(self) -> int:
+        self._refresh()
         return sum(1 for i in self._ids if i >= 0)
 
     def ids(self) -> list[int]:
+        self._refresh()
         return [i for i in self._ids if i >= 0]
 
     def reset(self) -> None:
