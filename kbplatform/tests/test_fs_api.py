@@ -106,3 +106,76 @@ def test_search_does_not_leak_other_branch(app, tmp_path):
     assert [r["rel"] for r in body["results"]] == ["甲\\预算说明.docx"]
     assert c.get("/api/v1/fs/search?q=").json()["results"] == []
     assert c.get("/api/v1/fs/search?q=预算&limit=999").status_code == 422
+
+
+def test_chunked_upload_creates_file_and_enqueues_parse(app, tmp_path):
+    share = tmp_path / "s"
+    share.mkdir()
+    conn = app.state.conn
+    sid = _source(conn, share)
+    c, uid = _login(app)
+    _grant(conn, uid, sid, "", can_write=True)
+    data = "制度正文".encode("utf-8") * 1000
+    init = c.post("/api/v1/fs/upload/init", json={
+        "source_id": sid, "rel": "", "name": "制度.md", "size": len(data)}).json()
+    up = init["upload_id"]
+    for off in range(0, len(data), 4096):
+        r = c.put(f"/api/v1/fs/upload/{up}?offset={off}", content=data[off:off + 4096])
+        assert r.status_code == 200, r.text
+    done = c.post(f"/api/v1/fs/upload/{up}/complete").json()
+    assert (share / "制度.md").read_bytes() == data
+    assert done["queued"] is True
+    assert conn.execute("SELECT status FROM catalog WHERE name='制度.md'").fetchone()[0] == "pending"
+    assert conn.execute("SELECT COUNT(*) FROM fs_entries WHERE name='制度.md'").fetchone()[0] == 1
+
+
+def test_upload_existing_without_overwrite_409_and_bad_name_400(app, tmp_path):
+    share = tmp_path / "s"
+    share.mkdir()
+    (share / "已有.txt").write_text("x", encoding="utf-8")
+    conn = app.state.conn
+    sid = _source(conn, share)
+    c, uid = _login(app)
+    _grant(conn, uid, sid, "", can_write=True)
+    r = c.post("/api/v1/fs/upload/init", json={
+        "source_id": sid, "rel": "", "name": "已有.txt", "size": 1})
+    assert r.status_code == 409
+    r = c.post("/api/v1/fs/upload/init", json={
+        "source_id": sid, "rel": "", "name": "../x.txt", "size": 1})
+    assert r.status_code == 400
+    r = c.post("/api/v1/fs/upload/init", json={
+        "source_id": sid, "rel": "", "name": "新.txt", "size": 10 ** 12})
+    assert r.status_code == 413
+
+
+def test_overwrite_upload_resets_parse_state_and_requeues(app, tmp_path):
+    share = tmp_path / "s"
+    share.mkdir()
+    (share / "a.md").write_text("旧内容", encoding="utf-8")
+    conn = app.state.conn
+    sid = _source(conn, share)
+    c, uid = _login(app)
+    _grant(conn, uid, sid, "", can_write=True)
+    data = "新内容".encode("utf-8")
+    init = c.post("/api/v1/fs/upload/init", json={
+        "source_id": sid, "rel": "", "name": "a.md", "size": len(data),
+        "overwrite": True}).json()
+    up = init["upload_id"]
+    assert c.put(f"/api/v1/fs/upload/{up}?offset=0", content=data).status_code == 200
+    assert c.post(f"/api/v1/fs/upload/{up}/complete").status_code == 200
+    cid = conn.execute("SELECT id FROM catalog WHERE name='a.md'").fetchone()[0]
+    conn.execute("UPDATE catalog SET status='done', tier1_done=1 WHERE id=?", (cid,))
+    conn.execute("UPDATE jobs SET state='done'")
+    conn.commit()
+    data2 = "再改一次".encode("utf-8")
+    init = c.post("/api/v1/fs/upload/init", json={
+        "source_id": sid, "rel": "", "name": "a.md", "size": len(data2),
+        "overwrite": True}).json()
+    up = init["upload_id"]
+    assert c.put(f"/api/v1/fs/upload/{up}?offset=0", content=data2).status_code == 200
+    assert c.post(f"/api/v1/fs/upload/{up}/complete").status_code == 200
+    row = conn.execute("SELECT status, tier1_done FROM catalog WHERE id=?", (cid,)).fetchone()
+    assert row["status"] == "pending" and row["tier1_done"] == 0
+    assert conn.execute("SELECT COUNT(*) FROM jobs WHERE state='queued'").fetchone()[0] == 1
+
+

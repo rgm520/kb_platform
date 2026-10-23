@@ -290,6 +290,11 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
     # ------------------------------------------------------------ 2.0 文件域
     app.state.scanner = SourceScanner(conn, cfg)
     register_fs_routes(app, cfg, conn, require_user, require_admin, audit)
+    try:
+        from kbplatform.fs_service import cleanup_uploads
+        cleanup_uploads(cfg, conn)
+    except Exception:
+        pass
     if cfg.source_scan_interval_sec > 0:
         app.state.scanner.start()
 

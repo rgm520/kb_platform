@@ -6,15 +6,19 @@ import mimetypes
 import os
 import shutil
 import time
+import uuid
 from urllib.parse import quote
 
-from fastapi import Depends, HTTPException, Query
+from fastapi import Body, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
 
-from kbplatform import auth, converters, fsindex, grants as grants_mod
+from kbplatform import auth, converters, fsindex, grants as grants_mod, indexer
+from kbplatform.catalog import PARSEABLE_EXT, FileRecord
 from kbplatform.config import Config
+from kbplatform.db import upsert_catalog
 from kbplatform.fsindex import rel_key
 from kbplatform.grants import can_read, can_write, filter_entries, user_grants
+from kbplatform.paths import split_share
 from kbplatform.storage import (Entry, adapter_for, is_safe_rel, normalize_rel,
                                 source_from_row)
 
@@ -151,7 +155,35 @@ def _office_pdf(cfg: Config, adapter, source, rel: str, entry) -> str | None:
     return converters.convert_to_pdf(local, cfg.preview_dir, stem=key)
 
 
+def cleanup_uploads(cfg: Config, conn, max_age_sec: int = 86400) -> int:
+    """清理中断超过 24 小时的分片上传临时文件。"""
+    now = time.time()
+    n = 0
+    for r in conn.execute("SELECT id, temp_path, created_at FROM upload_sessions").fetchall():
+        if now - (r["created_at"] or 0) < max_age_sec:
+            continue
+        try:
+            if r["temp_path"] and os.path.isfile(r["temp_path"]):
+                os.unlink(r["temp_path"])
+        except OSError:
+            pass
+        conn.execute("DELETE FROM upload_sessions WHERE id=?", (r["id"],))
+        n += 1
+    conn.commit()
+    return n
+
+
 def register_fs_routes(app, cfg: Config, conn, require_user, require_admin, audit):
+    uploads_dir = os.path.join(cfg.data_dir, "uploads")
+
+    def _upload_session(upload_id: str, user) -> dict:
+        row = conn.execute("SELECT * FROM upload_sessions WHERE id=?", (upload_id,)).fetchone()
+        if row is None:
+            raise HTTPException(404, detail="上传会话不存在")
+        if int(row["user_id"]) != int(user["id"]) and not _is_admin(user):
+            raise HTTPException(404, detail="上传会话不存在")
+        return dict(row)
+
     # ------------------------------------------------------------ 浏览
     @app.get("/api/v1/fs/sources")
     def fs_sources(user=Depends(require_user)):
@@ -272,3 +304,120 @@ def register_fs_routes(app, cfg: Config, conn, require_user, require_admin, audi
     @app.get("/api/v1/fs/download")
     def fs_download(source_id: int, rel: str, user=Depends(require_user)):
         return fs_preview(source_id, rel, download=1, user=user)
+
+    # ------------------------------------------------------------ 上传
+    @app.post("/api/v1/fs/upload/init")
+    def upload_init(payload: dict = Body(...), user=Depends(require_user)):
+        try:
+            source_id = int(payload["source_id"])
+            size = int(payload.get("size", 0))
+        except Exception:
+            raise HTTPException(400, detail="source_id/size 不合法")
+        name = str(payload.get("name", "")).strip()
+        rel = normalize_rel(payload.get("rel", ""))
+        overwrite = bool(payload.get("overwrite"))
+        if (not name or name in (".", "..") or "/" in name or "\\" in name
+                or any(ch in name for ch in '*?"<>|:')):
+            raise HTTPException(400, detail="文件名不合法")
+        if not is_safe_rel(rel):
+            raise HTTPException(400, detail="非法路径")
+        if size < 0:
+            raise HTTPException(400, detail="文件大小不合法")
+        if size > cfg.upload_max_mb * 1024 * 1024:
+            raise HTTPException(413, detail=f"文件超过 {cfg.upload_max_mb} MB 上限")
+        row = _source_row(conn, source_id)
+        source, adapter = _adapter(conn, row)
+        gs = user_grants(conn, user)
+        if not _write_ok(user, gs, source, rel):
+            raise HTTPException(403, detail="目录没有写权限")
+        if rel and adapter.stat(rel) is None:
+            raise HTTPException(404, detail="目标目录不存在")
+        target = normalize_rel(f"{rel}\\{name}" if rel else name)
+        existing = adapter.stat(target)
+        if existing is not None:
+            if existing.is_dir:
+                raise HTTPException(409, detail="目标是目录")
+            if not overwrite:
+                raise HTTPException(409, detail="同名文件已存在")
+        os.makedirs(uploads_dir, exist_ok=True)
+        upid = uuid.uuid4().hex
+        temp = os.path.join(uploads_dir, upid + ".part")
+        with open(temp, "wb"):
+            pass
+        conn.execute(
+            "INSERT INTO upload_sessions(id,user_id,source_id,rel,name,size,temp_path,"
+            "received,overwrite,created_at) VALUES (?,?,?,?,?,?,?,0,?,?)",
+            (upid, user["id"], source.id, rel, name, size, temp, 1 if overwrite else 0,
+             time.time()))
+        conn.commit()
+        return {"upload_id": upid, "chunk_size": 5 * 1024 * 1024}
+
+    @app.put("/api/v1/fs/upload/{upload_id}")
+    async def upload_chunk(upload_id: str, request: Request, offset: int = Query(..., ge=0),
+                           user=Depends(require_user)):
+        sess = _upload_session(upload_id, user)
+        if offset != int(sess["received"]):
+            raise HTTPException(409, detail=f"分片顺序错误，期望 offset={sess['received']}")
+        data = await request.body()
+        if int(sess["received"]) + len(data) > int(sess["size"]):
+            raise HTTPException(413, detail="上传内容超过声明大小")
+        with open(sess["temp_path"], "ab") as f:
+            f.write(data)
+        received = int(sess["received"]) + len(data)
+        conn.execute("UPDATE upload_sessions SET received=? WHERE id=?", (received, upload_id))
+        conn.commit()
+        return {"received": received}
+
+    @app.post("/api/v1/fs/upload/{upload_id}/complete")
+    def upload_complete(upload_id: str, request: Request, user=Depends(require_user)):
+        sess = _upload_session(upload_id, user)
+        if int(sess["received"]) != int(sess["size"]):
+            raise HTTPException(409, detail="上传尚未完成")
+        row = _source_row(conn, int(sess["source_id"]))
+        source, adapter = _adapter(conn, row)
+        rel = normalize_rel(sess["rel"])
+        gs = user_grants(conn, user)
+        if not _write_ok(user, gs, source, rel):
+            raise HTTPException(403, detail="目录没有写权限")
+        target = normalize_rel(f"{rel}\\{sess['name']}" if rel else sess["name"])
+        existing = adapter.stat(target)
+        if existing is not None and not int(sess["overwrite"]):
+            raise HTTPException(409, detail="同名文件已存在")
+        path = fsindex.entry_path(source, target)
+        old = conn.execute("SELECT id FROM catalog WHERE path=?", (path,)).fetchone()
+        with open(sess["temp_path"], "rb") as src:
+            adapter.write_stream(target, src, int(sess["size"]))
+        e = adapter.stat(target)
+        if e is None:
+            raise HTTPException(500, detail="写入后找不到文件")
+        fsindex.upsert_entry(conn, source, e)
+        ext = os.path.splitext(e.name)[1].lower()
+        parseable = ext in PARSEABLE_EXT
+        cid = None
+        if parseable:
+            cid = upsert_catalog(conn, FileRecord(
+                path=path, share=split_share(source.root)[0] or source.name,
+                rel_path=target, name=e.name, ext=ext,
+                size=e.size, mtime=e.mtime))
+        scanner = app.state.scanner
+        if parseable and old:
+            indexer.clear_artifacts(conn, cfg.fts_path, scanner.vs, path)
+            conn.execute("UPDATE catalog SET status='pending', status_detail=NULL, "
+                         "tier1_done=0, tier2_done=0 WHERE id=?", (cid,))
+            conn.commit()
+        if parseable:
+            scanner.queue.enqueue("index", cid, force=bool(old))
+        if cid:
+            conn.execute("UPDATE fs_entries SET catalog_id=? WHERE source_id=? AND rel_key=?",
+                         (cid, source.id, rel_key(target)))
+        conn.commit()
+        try:
+            os.unlink(sess["temp_path"])
+        except OSError:
+            pass
+        conn.execute("DELETE FROM upload_sessions WHERE id=?", (upload_id,))
+        conn.commit()
+        audit(user["id"], None, "upload", question=f"{source.name}:{target}",
+              hit_paths=[path], ip=None)
+        entry = _entry_dict(conn, source.id, e, False)
+        return {"entry": entry, "catalog_id": cid, "queued": bool(parseable)}

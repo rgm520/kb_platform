@@ -155,6 +155,7 @@ CREATE TABLE IF NOT EXISTS upload_sessions (
   size       INTEGER NOT NULL,
   temp_path  TEXT NOT NULL,
   received   INTEGER DEFAULT 0,
+  overwrite  INTEGER DEFAULT 0,
   created_at REAL
 );
 
@@ -434,7 +435,8 @@ def init_db(db_path: str) -> sqlite3.Connection:
                 # 密钥的可恢复密文：让管理员能重新查看完整密钥，
                 # 避免"密钥只能显示一次 -> 丢失就必须换密钥 -> 正在用旧密钥的
                 # 智能体全部 401" 这个死循环。
-                "ALTER TABLE api_tokens ADD COLUMN token_enc TEXT"):
+                "ALTER TABLE api_tokens ADD COLUMN token_enc TEXT",
+                "ALTER TABLE upload_sessions ADD COLUMN overwrite INTEGER DEFAULT 0"):
         try:
             conn.execute(ddl)
         except sqlite3.OperationalError:
