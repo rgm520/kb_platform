@@ -232,6 +232,35 @@ function initGraph() {
   });
   state.cy.on("tap", "node", (e) => showNode(e.target.id()));
   cyReady = true;
+  loadGraphOverview();
+}
+
+async function loadGraphOverview() {
+  const cy = state.cy;
+  if (!cy) return;
+  try {
+    const r = await api("/api/v1/graph/overview?limit=60");
+    cy.elements().remove();
+    const ids = new Set(r.nodes.map(n => String(n.id)));
+    const els = r.nodes.map(n => ({ data: {
+      id: String(n.id), label: n.name, type: n.type,
+      size: 14 + Math.min(20, n.mentions || 0) } }));
+    for (const e of r.edges) {
+      if (!ids.has(String(e.src)) || !ids.has(String(e.dst))) continue;
+      els.push({ data: { id: e.src + "->" + e.dst + "|" + e.rel,
+                         source: String(e.src), target: String(e.dst), rel: e.rel } });
+    }
+    cy.add(els);
+    cy.layout({ name: "cose", animate: false, padding: 30,
+                nodeRepulsion: 8000, idealEdgeLength: 90 }).run();
+    cy.fit(undefined, 40);
+    $("#g-side").innerHTML = r.nodes.length
+      ? `<h3>知识图谱</h3>
+         <div class="kv">已加载 ${r.nodes.length} 个高频节点、${r.edges.length} 条关系</div>
+         <div class="kv">点击节点查看详情，或用上方搜索定位</div>`
+      : `<h3>知识图谱</h3>
+         <div class="muted">还没有图谱数据，Tier 2 提炼完成后会自动出现。</div>`;
+  } catch (e) { toast("图谱加载失败: " + e.message); }
 }
 
 async function searchNodes() {
@@ -251,6 +280,7 @@ async function searchNodes() {
   } catch (e) { toast("图谱搜索失败: " + e.message); }
 }
 $("#g-search").addEventListener("click", searchNodes);
+$("#g-refresh").addEventListener("click", loadGraphOverview);
 $("#g-q").addEventListener("keydown", e => { if (e.key === "Enter") searchNodes(); });
 
 async function expandNode(id, replace) {

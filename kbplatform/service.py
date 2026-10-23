@@ -464,6 +464,38 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
             out.append({"id": r[0], "name": r[1], "type": r[2], "mentions": r[3]})
         return {"nodes": out}
 
+    @app.get("/api/v1/graph/overview")
+    def api_graph_overview(limit: int = 60, ctx=Depends(actor)):
+        """图谱页初始视图：范围内被提及最多的节点及它们之间的关系。
+
+        没有这个接口时，图谱页要先搜索才出图，用户打开看到的是空白画布。
+        """
+        u = ctx["user"]
+        pred, params = scope_predicate(u)
+        limit = max(10, min(limit, 200))
+        rows = conn.execute(
+            f"""SELECT n.id, n.name, n.type, n.mentions FROM nodes n
+                WHERE n.merged_to IS NULL AND EXISTS (
+                  SELECT 1 FROM edges e JOIN chunks ch ON ch.id=e.chunk_id
+                  JOIN catalog c ON c.path=ch.file_path
+                  WHERE (e.src=n.id OR e.dst=n.id) AND {pred})
+                ORDER BY n.mentions DESC LIMIT ?""",
+            params + [limit]).fetchall()
+        nodes = [{"id": r[0], "name": r[1], "type": r[2], "mentions": r[3]} for r in rows]
+        ids = [r[0] for r in rows]
+        edges = []
+        if ids:
+            marks = ",".join("?" * len(ids))
+            erows = conn.execute(
+                f"""SELECT e.src, e.dst, e.rel FROM edges e
+                    JOIN chunks ch ON ch.id=e.chunk_id
+                    JOIN catalog c ON c.path=ch.file_path
+                    WHERE e.src IN ({marks}) AND e.dst IN ({marks}) AND {pred}
+                    GROUP BY e.src, e.dst, e.rel LIMIT 500""",
+                ids + ids + params).fetchall()
+            edges = [{"src": r[0], "dst": r[1], "rel": r[2]} for r in erows]
+        return {"nodes": nodes, "edges": edges}
+
     @app.get("/api/v1/graph/neighbors")
     def api_graph_neighbors(node: int, hops: int = 1, ctx=Depends(actor)):
         u = ctx["user"]
