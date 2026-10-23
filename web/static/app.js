@@ -227,7 +227,9 @@ function initGraph() {
       { selector: "node:selected", style: { "border-color": "#fff", "border-width": 3 } },
       { selector: "edge", style: { "width": 1, "line-color": "#3a4652", "curve-style": "straight",
           "target-arrow-shape": "triangle", "target-arrow-color": "#3a4652",
-          "label": "data(rel)", "font-size": 9, "color": "#8b98a5", "text-rotation": "autorotate" } },
+          "label": "data(rel)", "font-size": 9, "color": "#c9d4df", "text-rotation": "autorotate",
+          "text-background-color": "#0f1419", "text-background-opacity": 0.8,
+          "text-background-padding": "2px" } },
     ],
   });
   state.cy.on("tap", "node", (e) => showNode(e.target.id()));

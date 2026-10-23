@@ -77,6 +77,8 @@ tr:hover td{background:#1a212a}
 #g-side h3{margin:0 0 8px;font-size:15px}
 #g-side .kv{color:var(--muted);font-size:12px;margin:3px 0}
 #g-side .rel{margin:4px 0;padding:5px 8px;background:var(--panel2);border-radius:5px;font-size:12px}
+#g-side .rel a{color:#79c0ff;text-decoration:none;border-bottom:1px solid rgba(121,192,255,.35)}
+#g-side .rel a:hover{color:#c7e3ff;border-bottom-color:#c7e3ff}
 .g-list{margin-top:12px;display:flex;flex-wrap:wrap;gap:6px}
 .g-list .chip{padding:4px 10px;background:var(--panel);border:1px solid var(--line);border-radius:16px;cursor:pointer;font-size:12px}
 .g-list .chip:hover{border-color:var(--accent)}
