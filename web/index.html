@@ -5,19 +5,36 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>企业知识平台</title>
 <link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/v2.css">
 </head>
 <body>
 <div id="app">
   <!-- 登录 -->
   <div id="login" class="login-wrap hidden">
-    <form id="login-form" class="card login-card">
-      <h1>企业知识平台</h1>
-      <p class="muted">用公司分配的账号登录</p>
-      <label>用户名<input id="login-user" autocomplete="username" required></label>
-      <label>密码<input id="login-pass" type="password" autocomplete="current-password" required></label>
-      <button type="submit" class="primary">登录</button>
-      <div id="login-err" class="err"></div>
-    </form>
+    <div class="login-left">
+      <div class="login-brand">
+        <div class="logo-mark">KB</div>
+        <h1>企业知识平台 <span>2.0</span></h1>
+        <p>把文件、知识与人连在一起的企业 NAS。</p>
+        <ul class="login-points">
+          <li>账号登录，按目录授权</li>
+          <li>文件名秒搜，内容智能问答</li>
+          <li>本地共享与 SMB 存储统一接入</li>
+        </ul>
+      </div>
+      <div class="login-grid" aria-hidden="true"></div>
+      <div class="login-glow" aria-hidden="true"></div>
+    </div>
+    <div class="login-right">
+      <form id="login-form" class="card login-card">
+        <h2>登录工作台</h2>
+        <p class="muted">使用管理员分配的账号进入</p>
+        <label>用户名<input id="login-user" autocomplete="username" required></label>
+        <label>密码<input id="login-pass" type="password" autocomplete="current-password" required></label>
+        <button type="submit" class="primary">进入平台</button>
+        <div id="login-err" class="err"></div>
+      </form>
+    </div>
   </div>
 
   <!-- 主界面 -->
@@ -25,6 +42,9 @@
     <header class="topbar">
       <div class="brand">企业知识平台</div>
       <nav id="nav">
+        <a href="#/desktop" data-p="desktop">桌面</a>
+        <a href="#/files" data-p="files">文件</a>
+        <a href="#/trash" data-p="trash">回收站</a>
         <a href="#/board" data-p="board">文档看板</a>
         <a href="#/graph" data-p="graph">知识图谱</a>
         <a href="#/ask" data-p="ask">AI 问答</a>
@@ -36,6 +56,82 @@
         <button id="logout" class="ghost">退出</button>
       </div>
     </header>
+
+    <!-- 功能桌面 -->
+    <section id="p-desktop" class="page">
+      <div class="desktop-head">
+        <h2>工作台</h2>
+        <p class="muted">选择一个功能开始工作</p>
+      </div>
+      <div id="desktop-grid" class="desktop-grid">
+        <button class="desk-card" data-open="files">
+          <span class="desk-icon">▤</span>
+          <strong>文件</strong><small>浏览、搜索、预览与上传</small>
+        </button>
+        <button class="desk-card" data-open="ask">
+          <span class="desk-icon">✦</span>
+          <strong>AI 问答</strong><small>按文件名或内容找答案</small>
+        </button>
+        <button class="desk-card" data-open="graph">
+          <span class="desk-icon">◈</span>
+          <strong>知识图谱</strong><small>查看实体与知识点关联</small>
+        </button>
+        <button class="desk-card" data-open="board">
+          <span class="desk-icon">▦</span>
+          <strong>文档看板</strong><small>解析进度与文档状态</small>
+        </button>
+        <button class="desk-card" data-open="trash">
+          <span class="desk-icon">♻</span>
+          <strong>回收站</strong><small>恢复误删的文件</small>
+        </button>
+        <button class="desk-card admin-only" data-open="admin">
+          <span class="desk-icon">⚙</span>
+          <strong>管理台</strong><small>存储接入、用户与授权</small>
+        </button>
+      </div>
+    </section>
+
+    <!-- 文件管理器 -->
+    <section id="p-files" class="page">
+      <div class="fm-shell">
+        <aside class="fm-side">
+          <div class="fm-side-head">存储源</div>
+          <div id="fm-sources"></div>
+        </aside>
+        <div class="fm-main">
+          <div class="fm-toolbar">
+            <div id="fm-crumbs" class="fm-crumbs"></div>
+            <div class="fm-actions">
+              <input id="fm-search" placeholder="按文件名秒搜…" autocomplete="off">
+              <button id="fm-upload" class="primary">上传</button>
+              <input id="fm-file" type="file" multiple hidden>
+            </div>
+          </div>
+          <div id="fm-search-results" class="fm-search-results hidden"></div>
+          <div class="fm-table-wrap">
+            <table class="fm-table">
+              <thead><tr>
+                <th class="fm-check"><input type="checkbox" id="fm-check-all"></th>
+                <th>名称</th><th>大小</th><th>修改时间</th><th>解析状态</th>
+              </tr></thead>
+              <tbody id="fm-list"></tbody>
+            </table>
+          </div>
+          <div id="fm-upload-panel" class="fm-upload-panel hidden"></div>
+        </div>
+        <aside id="fm-preview" class="fm-preview hidden"></aside>
+      </div>
+      <div id="fm-ctx" class="fm-ctx hidden"></div>
+    </section>
+
+    <!-- 回收站 -->
+    <section id="p-trash" class="page">
+      <div class="page-head">
+        <div><h2>回收站</h2><p class="muted">删除的文件可在这里恢复，过期后由管理员清理。</p></div>
+        <button id="trash-refresh">刷新</button>
+      </div>
+      <div id="trash-list"></div>
+    </section>
 
     <!-- 看板 -->
     <section id="p-board" class="page">
@@ -115,7 +211,7 @@
     <section id="p-admin" class="page">
       <div class="tabs">
         <button data-t="users" class="active">用户与权限</button>
-        <button data-t="restricted">涉密目录</button>
+        <button data-t="sources">存储接入</button>
         <button data-t="models">模型配置</button>
         <button data-t="tokens">API 密钥</button>
         <button data-t="agents">已接入智能体</button>
@@ -132,6 +228,9 @@
 <div id="toast" class="toast hidden"></div>
 
 <script src="/static/vendor/cytoscape.min.js"></script>
+<script src="/static/desktop.js"></script>
+<script src="/static/files.js"></script>
+<script src="/static/admin-sources.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

@@ -3,7 +3,7 @@ const $ = (s, r) => (r || document).querySelector(s);
 const $$ = (s, r) => Array.from((r || document).querySelectorAll(s));
 
 const state = {
-  user: null, role: null, page: "board",
+  user: null, role: null, page: "desktop",
   docs: { page: 1, size: 50, total: 0 },
   filters: { status: "", share: "" },
   cy: null, models: [], adminTab: "users",
@@ -45,11 +45,13 @@ function showLogin() {
 }
 function showMain(user) {
   state.user = user; state.role = user.role;
+  window.KB = window.KB || {}; window.KB.me = user;
   $("#login").classList.add("hidden");
   $("#main").classList.remove("hidden");
   $("#who").textContent = (user.display_name || user.username) + (user.role === "admin" ? "（管理员）" : "");
   $$(".admin-only").forEach(e => e.classList.toggle("hidden", user.role !== "admin"));
   loadModels();
+  if (!location.hash || location.hash === "#/board") location.hash = "#/desktop";
   route();
 }
 $("#login-form").addEventListener("submit", async (e) => {
@@ -97,11 +99,14 @@ window.doChangePwd = async () => {
 
 /* ---------------------------------------------------------- 路由 */
 function route() {
-  const h = (location.hash || "#/board").replace("#/", "");
-  const p = ["board", "graph", "ask", "admin"].includes(h) ? h : "board";
+  const h = (location.hash || "#/desktop").replace("#/", "");
+  const p = ["desktop", "files", "trash", "board", "graph", "ask", "admin"].includes(h) ? h : "desktop";
   state.page = p;
   $$("#nav a").forEach(a => a.classList.toggle("active", a.dataset.p === p));
   $$(".page").forEach(s => s.classList.toggle("active", s.id === "p-" + p));
+  if (p === "desktop") window.KB && KB.desktop && KB.desktop.mount();
+  if (p === "files") window.KB && KB.files && KB.files.load();
+  if (p === "trash") window.KB && KB.trash && KB.trash.load();
   if (p === "board") loadStats(), loadDocs();
   if (p === "graph") initGraph();
   if (p === "ask") loadModels();
@@ -390,6 +395,7 @@ async function loadAdmin() {
   body.innerHTML = '<p class="muted">加载中…</p>';
   try {
     if (state.adminTab === "users") return adminUsers(body);
+    if (state.adminTab === "sources") return KB.adminSources.render(body);
     if (state.adminTab === "restricted") return adminRestricted(body);
     if (state.adminTab === "models") return adminModels(body);
     if (state.adminTab === "tokens") return adminTokens(body);
@@ -427,7 +433,8 @@ async function adminUsers(body) {
             (u.role === "admin" ? '<span class="muted">（全部）</span>'
                                  : '<span class="muted">（未授权）</span>')}</td>
       <td>${u.active ? '<span class="muted">启用</span>' : '<span class="err">已停用</span>'}</td>
-      <td><button class="sm" onclick="grantUser(${u.id})">授权</button>
+      <td><button class="sm" onclick="KB.adminSources.openGrants(${u.id})">目录授权</button>
+         <button class="sm" onclick="grantUser(${u.id})">旧范围</button>
          <button class="sm" onclick="filterTokensOf(${u.id})">密钥 ${tokenCount(u.id)}</button>
          <button class="sm" onclick="toggleActive(${u.id},${u.active ? 0 : 1})">${u.active ? "停用" : "启用"}</button></td></tr>`).join("")}
     </tbody></table>`;
