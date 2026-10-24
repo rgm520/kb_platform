@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 from kbplatform import auth, models as models_mod
 from kbplatform.config import Config, load_config
 from kbplatform.db import init_db, ThreadLocalConn, write_with_retry
-from kbplatform.fs_service import register_fs_routes
+from kbplatform.fs_service import provision_sources_from_config, register_fs_routes
 from kbplatform.retrieval import Retriever
 from kbplatform.scanner import SourceScanner
 from kbplatform.scopes import (load_restricted, load_scopes, describe_scopes,
@@ -148,6 +148,11 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
     # 请求线程各自持有一条连接：共享一条连接时，别的线程 commit 会把
     # 本线程尚未 fetch 的游标重置，表现为随机的 "NoneType is not subscriptable"。
     conn = ThreadLocalConn(cfg.db_path)
+    # 配置里已经在监控的目录自动登记为存储源：管理员登录即可看到全部共享文件夹
+    try:
+        provision_sources_from_config(conn, cfg)
+    except Exception as e:  # 自动接入失败不能挡住服务启动
+        print(f"[service] 自动接入配置共享失败: {type(e).__name__}: {e}")
     vs = VectorStore(cfg.vector_dir, dim=cfg.embed_dim)
     retriever = Retriever(conn, cfg.fts_path, vs, embed_model=cfg.embed_model)
     secret = os.environ.get("KB_SESSION_SECRET") or secrets.token_hex(32)

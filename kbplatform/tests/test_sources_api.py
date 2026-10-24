@@ -14,6 +14,21 @@ def app(tmp_path):
     return make_app(str(cfg))
 
 
+@pytest.fixture()
+def app_with_shares(tmp_path):
+    """配置里已经有 NAS 盘符/共享清单（老平台的监控根）。"""
+    cfg = tmp_path / "config.toml"
+    data = str(tmp_path / "data").replace("\\", "/")
+    cfg.write_text(
+        f'[paths]\ndata_dir="{data}"\n'
+        '[storage]\nsource_scan_interval_sec=0\n'
+        '[drives]\n'
+        '"W:" = "\\\\\\\\192.0.2.19\\\\信息化管理\\\\AI知识库"\n'
+        '[shares]\nnames = ["信息化管理", "video"]\n',
+        encoding="utf-8")
+    return make_app(str(cfg))
+
+
 def _login(app, name="admin", role="admin"):
     conn = app.state.conn
     create_user(conn, name, "pw123456", role=role)
@@ -95,3 +110,23 @@ def test_delete_source_requires_force_when_grants_exist(app, tmp_path):
     assert c.delete(f"/api/v1/admin/sources/{sid}?force=1").status_code == 200
     assert c.get("/api/v1/admin/sources").json()["sources"] == []
     assert c.get(f"/api/v1/admin/users/{uid}/grants").json()["grants"] == []
+
+
+def test_candidates_are_derived_from_config_shares(app_with_shares):
+    """管理台要能从老平台配置里的盘符/共享清单一键列出可接入的共享根。"""
+    c, _ = _login(app_with_shares)
+    body = c.get("/api/v1/admin/sources/candidates").json()
+    roots = [x["root"] for x in body["candidates"]]
+    assert "\\\\192.0.2.19\\信息化管理" in roots
+    assert "\\\\192.0.2.19\\video" in roots
+    assert all(x["kind"] == "smb" for x in body["candidates"])
+
+
+def test_candidates_mark_already_added_sources(app_with_shares):
+    """已经接入过的共享要标出来，别让管理员重复添加。"""
+    c, _ = _login(app_with_shares)
+    c.post("/api/v1/admin/sources", json={
+        "name": "信息化管理", "kind": "smb", "root": "\\\\192.0.2.19\\信息化管理"})
+    body = c.get("/api/v1/admin/sources/candidates").json()
+    hit = [x for x in body["candidates"] if x["root"] == "\\\\192.0.2.19\\信息化管理"]
+    assert hit and hit[0]["added"] is True

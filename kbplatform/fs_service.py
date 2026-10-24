@@ -186,6 +186,92 @@ def _source_admin_dict(r) -> dict:
     }
 
 
+def _unc_parts(path: str) -> list[str]:
+    p = str(path or "").replace("/", "\\").strip()
+    if not p.startswith("\\\\"):
+        return []
+    return [seg for seg in p[2:].split("\\") if seg]
+
+
+def config_share_candidates(cfg) -> list[dict]:
+    """从老平台配置里推导"可以接入的共享根"。
+
+    配置里的盘符（[drives]）是平台已经在监控的目录，直接可接；
+    共享清单（[shares]）是整个共享，范围大，只作为候选项由管理员按需接入。
+    """
+    out: list[dict] = []
+    seen: set[str] = set()
+    host = ""
+    drives = cfg.drive_map or {}
+    for letter, unc in drives.items():
+        parts = _unc_parts(unc)
+        if len(parts) >= 2 and not host:
+            host = parts[0]
+    for letter, unc in sorted(drives.items()):
+        parts = _unc_parts(unc)
+        if len(parts) < 2:
+            continue
+        root = "\\\\" + "\\".join(parts)
+        key = root.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({
+            "name": "\\".join(parts[1:]), "kind": "smb", "root": root,
+            "scope": "drive", "origin": f"盘符 {letter}", "auto": True,
+        })
+    for share in cfg.share_names or []:
+        share = str(share).strip()
+        if not share or not host:
+            continue
+        root = f"\\\\{host}\\{share}"
+        key = root.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({
+            "name": share, "kind": "smb", "root": root,
+            "scope": "share", "origin": "共享清单", "auto": False,
+        })
+    return out
+
+
+def provision_sources_from_config(conn, cfg) -> list[dict]:
+    """把配置里已经在监控的目录自动登记为存储源（幂等）。
+
+    这样管理员一登录就能在文件页看到全部共享文件夹，不必先手动接入；
+    已经存在的源不动，管理员改过的配置不会被覆盖。
+    """
+    created: list[dict] = []
+    existing = {str(r["root"]).lower(): r
+                for r in conn.execute("SELECT * FROM storage_sources")}
+    used_names = {str(r["name"]) for r in conn.execute("SELECT name FROM storage_sources")}
+    for cand in config_share_candidates(cfg):
+        if not cand.get("auto"):
+            continue
+        root = cand["root"]
+        if root.lower() in existing:
+            continue
+        name = cand["name"]
+        if name in used_names:
+            name = f"{name} ({root})"
+            if name in used_names:
+                continue
+        try:
+            conn.execute(
+                "INSERT INTO storage_sources(name,kind,root,username,secret_enc,domain,"
+                "writable,personal_root,enabled,scan_state,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,'idle',?)",
+                (name, cand["kind"], root, None, None, None, 1, "", 1, time.time()))
+        except sqlite3.IntegrityError:
+            continue
+        used_names.add(name)
+        created.append({"name": name, "root": root})
+    if created:
+        conn.commit()
+    return created
+
+
 def register_fs_routes(app, cfg: Config, conn, require_user, require_admin, audit):
     uploads_dir = os.path.join(cfg.data_dir, "uploads")
 
@@ -588,6 +674,22 @@ def register_fs_routes(app, cfg: Config, conn, require_user, require_admin, audi
     def admin_sources(user=Depends(require_admin)):
         rows = conn.execute("SELECT * FROM storage_sources ORDER BY id").fetchall()
         return {"sources": [_source_admin_dict(r) for r in rows]}
+
+    @app.get("/api/v1/admin/sources/candidates")
+    def admin_source_candidates(user=Depends(require_admin)):
+        """老平台配置里可接入的共享（盘符=已监控目录，共享清单=整个共享）。"""
+        existing = {str(r["root"]).lower(): r
+                    for r in conn.execute("SELECT * FROM storage_sources")}
+        items = []
+        for cand in config_share_candidates(cfg):
+            hit = existing.get(cand["root"].lower())
+            items.append({
+                "name": cand["name"], "kind": cand["kind"], "root": cand["root"],
+                "scope": cand["scope"], "origin": cand["origin"], "auto": cand["auto"],
+                "added": hit is not None,
+                "added_id": int(hit["id"]) if hit is not None else None,
+            })
+        return {"candidates": items}
 
     @app.post("/api/v1/admin/sources")
     def admin_source_create(payload: dict = Body(...), user=Depends(require_admin)):
