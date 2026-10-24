@@ -158,6 +158,7 @@
 
     <!-- 看板 -->
     <section id="p-board" class="page">
+      <div id="doc-ctx" class="fm-ctx hidden"></div>
       <div id="stat-cards" class="cards"></div>
       <div class="status-tabs" id="status-tabs">
         <button class="tab active" data-status="">全部<b id="tab-all">0</b></button>
@@ -197,9 +198,16 @@
         <input id="g-q" placeholder="搜索实体 / 知识点名称">
         <button id="g-search">搜索节点</button>
         <button id="g-refresh">刷新图谱</button>
+        <span class="fm-view">
+          <button id="g-zoom-out" title="缩小">−</button>
+          <button id="g-zoom-in" title="放大">＋</button>
+        </span>
+        <button id="g-fit" title="把全部节点缩放到可视范围">适应窗口</button>
+        <button id="g-layout" title="按当前窗口大小重新排布节点">重新布局</button>
         <label class="chk"><input type="checkbox" id="g-entity" checked>实体</label>
         <label class="chk"><input type="checkbox" id="g-kp" checked>知识点</label>
         <label class="chk"><input type="checkbox" id="g-cat" checked>分类</label>
+        <label class="chk"><input type="checkbox" id="g-rel-label">关系文字</label>
         <span class="muted">点击节点展开邻居</span>
       </div>
       <div class="graph-wrap">

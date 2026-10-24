@@ -153,6 +153,7 @@ async function loadDocs() {
     }
     for (const d of r.items) {
       const tr = document.createElement("tr");
+      tr.dataset.docId = d.id;
       tr.innerHTML = `
         <td>${esc(d.name)}<div class="muted" style="font-size:11px">${esc(d.rel_path || "")}</div></td>
         <td>${esc(d.share)}</td>
@@ -165,6 +166,10 @@ async function loadDocs() {
         <td>${d.kp_count || 0}</td>
         <td class="muted">${d.updated_at ? new Date(d.updated_at * 1000).toLocaleString("zh-CN") : "-"}</td>
         <td><button class="sm" onclick="showDoc(${d.id})">详情</button></td>`;
+      tr.addEventListener("contextmenu", (ev) => {
+        ev.preventDefault();
+        showDocMenu(ev, d);
+      });
       tb.appendChild(tr);
     }
     $("#doc-total").textContent = "共 " + r.total + " 个文档";
@@ -177,6 +182,88 @@ async function loadDocs() {
 }
 function statusText(s) {
   return ({ done: "已解析", pending: "待处理", failed: "失败", skipped: "已跳过" })[s] || s || "待处理";
+}
+
+/* ---------------------------------------------------------- 看板右键菜单 */
+async function showDocMenu(ev, doc) {
+  const menu = $("#doc-ctx");
+  if (!menu) return;
+  menu.innerHTML = `
+    <button data-act="view">查看文件</button>
+    <button data-act="locate">打开文档所在路径</button>
+    <button data-act="download">下载文件</button>
+    <button data-act="copy">复制文件路径</button>`;
+  menu.classList.remove("hidden");
+  menu.style.left = Math.min(ev.clientX, window.innerWidth - 210) + "px";
+  menu.style.top = Math.min(ev.clientY, window.innerHeight - 170) + "px";
+  let info = null;
+  const setMsg = (m) => { const t = menu.querySelector(".ctx-msg"); if (t) t.textContent = m; };
+  menu.querySelectorAll("button").forEach((b) => {
+    b.onclick = async () => {
+      const act = b.dataset.act;
+      hideDocMenu();
+      try {
+        if (!info) {
+          const r = await api(`/api/v1/documents/${doc.id}/file`);
+          info = r;
+        }
+        if (act === "view") {
+          if (info.in_fs) {
+            // 2.0 存储源里的文件：直接在文件页预览
+            location.hash = "#/files";
+            setTimeout(() => window.KB && KB.files && KB.files.openAt(info.source_id, info.rel, true), 120);
+          } else {
+            openDocText(doc, info);
+          }
+        } else if (act === "locate") {
+          if (info.in_fs) {
+            location.hash = "#/files";
+            setTimeout(() => window.KB && KB.files && KB.files.openAt(info.source_id, info.rel, false), 120);
+          } else {
+            toast("这个文件还没有接入 2.0 文件页，先在「存储接入」里接入对应共享");
+          }
+        } else if (act === "download") {
+          const a = document.createElement("a");
+          a.href = info.download_url;
+          a.download = info.name || doc.name;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+        } else if (act === "copy") {
+          const text = info.path || doc.rel_path || "";
+          if (navigator.clipboard) navigator.clipboard.writeText(text).then(() => toast("路径已复制")).catch(() => toast(text));
+          else toast(text);
+        }
+      } catch (e) { toast("操作失败: " + e.message, 5000); }
+    };
+  });
+  // 预取文件位置，失败时在菜单里提示
+  try {
+    const r = await api(`/api/v1/documents/${doc.id}/file`);
+    info = r;
+  } catch (e) {
+    setMsg("无法定位文件：" + e.message);
+  }
+}
+function hideDocMenu() {
+  const menu = $("#doc-ctx");
+  if (menu) menu.classList.add("hidden");
+}
+document.addEventListener("click", (e) => {
+  if (!e.target.closest || !e.target.closest("#doc-ctx")) hideDocMenu();
+});
+async function openDocText(doc, info) {
+  openModal(`<h3 style="margin:0 0 8px">${esc(doc.name)}</h3>
+    <p class="muted" style="font-size:12px">${esc(info.path || "")}</p>
+    <pre id="doc-text" style="max-height:60vh;overflow:auto;white-space:pre-wrap;font-size:12px">加载中…</pre>`);
+  try {
+    const r = await api(`/api/v1/documents/${doc.id}/content`);
+    const el = $("#doc-text");
+    if (el) el.textContent = r.text || "（没有解析出文本，可能是扫描件）";
+  } catch (e) {
+    const el = $("#doc-text");
+    if (el) el.textContent = "无法显示原文：" + e.message;
+  }
 }
 function goPage(n) {
   const pages = Math.max(1, Math.ceil(state.docs.total / state.docs.size));
@@ -214,31 +301,273 @@ async function showDoc(id) {
 
 /* ---------------------------------------------------------- 图谱 */
 let cyReady = false;
+let autoFit = true;          // 布局结束后是否自动缩放到全图
+
+// 布局参数：节点多、关系密，默认 cose 参数会把节点挤成一团、标签互相压盖。
+// 加大斥力与边长、降低重力、开启 tile（密集图更快更整齐），
+// 并让布局按"含标签的节点尺寸"计算斥力，标签才不会互相压。
+const GRAPH_LAYOUT = {
+  name: "cose", animate: false, padding: 40, tile: true,
+  nodeRepulsion: (node) => 14000 + 4000 * Math.min(6, node.degree()),
+  idealEdgeLength: 150, edgeElasticity: 0.45, gravity: 0.15,
+  numIter: 1500, componentSpacing: 120, refresh: 20,
+  nodeDimensionsIncludeLabels: true,
+};
+
+/** 屏幕上节点的平均最近邻间距（px）。 */
+function measureAvgScreenGap() {
+  const cy = state.cy;
+  if (!cy) return 999;
+  const nodes = cy.nodes();
+  if (nodes.length < 2) return 999;
+  const pos = nodes.map((n) => n.renderedPosition());
+  let sum = 0, cnt = 0;
+  for (let i = 0; i < pos.length; i++) {
+    let best = Infinity;
+    for (let j = 0; j < pos.length; j++) {
+      if (i === j) continue;
+      const dx = pos[i].x - pos[j].x, dy = pos[i].y - pos[j].y;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      if (d < best) best = d;
+    }
+    if (best < Infinity) { sum += best; cnt++; }
+  }
+  return cnt ? sum / cnt : 999;
+}
+
+/** 目标屏幕间距：至少 26px，且不小于节点平均直径的 1.4 倍（保证圆点不压圆点）。 */
+function targetGap() {
+  const cy = state.cy;
+  if (!cy) return 26;
+  const zoom = cy.zoom();
+  let sum = 0, n = 0;
+  cy.nodes().forEach((nd) => { sum += (nd.data("size") || 16) * zoom; n++; });
+  const avgDia = n ? sum / n : 16;
+  return Math.max(26, Math.round(avgDia * 1.4));
+}
+
+/** 屏幕上节点是否挤在一起了（平均最近邻屏幕间距小于目标）。 */
+function graphTooDense() {
+  return measureAvgScreenGap() < targetGap();
+}
+
+/** 布局后处理：强制节点之间的最小间距（硬约束）。
+ *  等比放大布局并不能提高"节点相对间距"（间距和缩放同步变化），
+ *  真正让节点不压在一起的办法是在模型坐标里把它们推开：
+ *  这样无论怎么缩放，圆点都不会重叠。 */
+function enforceMinDistance() {
+  const cy = state.cy;
+  if (!cy) return;
+  const nodes = cy.nodes();
+  if (nodes.length < 2) return;
+  const radius = (n) => (n.data("size") || 16) / 2;
+  for (let iter = 0; iter < 80; iter++) {
+    let moved = 0;
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        const a = nodes[i], b = nodes[j];
+        const pa = a.position(), pb = b.position();
+        let dx = pb.x - pa.x, dy = pb.y - pa.y;
+        let d = Math.sqrt(dx * dx + dy * dy);
+        if (d < 1e-6) { dx = (i % 7) - 3; dy = (j % 5) - 2; d = Math.sqrt(dx * dx + dy * dy); }
+        const need = 1.5 * (radius(a) + radius(b));   // 留出节点自身与标签的余量
+        if (d < need) {
+          const push = (need - d) / 2;
+          const ux = dx / d, uy = dy / d;
+          a.position({ x: pa.x - ux * push, y: pa.y - uy * push });
+          b.position({ x: pb.x + ux * push, y: pb.y + uy * push });
+          moved++;
+        }
+      }
+    }
+    if (!moved) break;
+  }
+}
+
+/** 布局的长宽比常常和画布差很多（竖长条塞进横窗口），白白浪费画布、节点挤成一团。
+ *  这里把"瘦的那一维"拉宽，让图形铺满画布，节点在屏幕上就分得开。
+ *  注意方向：布局比画布**瘦**（layoutAspect < viewAspect）时要拉宽 x，而不是压窄 x。 */
+function fitAspectToCanvas() {
+  const cy = state.cy;
+  if (!cy || !cy.nodes().length) return;
+  const bb = cy.elements().boundingBox();
+  const W = cy.width(), H = cy.height();
+  if (!bb || !bb.w || !bb.h || !W || !H) return;
+  const k = W / H / (bb.w / bb.h);        // >1 表示布局偏瘦
+  if (k > 1.12) {
+    const s = Math.min(2.0, k);
+    cy.nodes().forEach((n) => { const p = n.position(); n.position({ x: p.x * s, y: p.y }); });
+  } else if (k < 0.89) {
+    const s = Math.min(2.0, 1 / k);
+    cy.nodes().forEach((n) => { const p = n.position(); n.position({ x: p.x, y: p.y * s }); });
+  }
+}
+
+/** 节点直径：随图里节点总数自适应缩放。
+ *  点越多，圈越小（按 sqrt 反比），这样整张图"墨量"恒定，看着均衡；
+ *  同时重要（提及多）的节点略大一点。 */
+function graphNodeSize(mentions, total) {
+  const base = 7 + Math.min(6, mentions || 0);
+  const k = Math.sqrt(60 / Math.max(20, total || 60));
+  return Math.max(4, Math.min(16, Math.round(base * k)));
+}
+
+/** 重新排布：斥力调大让图收成一团（而不是拉成长条），再贴合到画布。
+ *  只跑一次 cose 收敛 + 一次最小间距松弛，不做循环，保证节点稳定不抖。 */
+function relayout(animate) {
+  const cy = state.cy;
+  if (!cy || !cy.nodes().length) return;
+  cy.resize();
+  const W = cy.width(), H = cy.height();
+  const k = Math.min(2.0, Math.max(0.75, Math.sqrt((W * H) / (900 * 600))));
+  cy.layout({
+    ...GRAPH_LAYOUT,
+    animate: animate === true,
+    animationDuration: 300,
+    randomize: animate === true ? false : undefined,
+    idealEdgeLength: Math.round(120 * k),
+    nodeRepulsion: (node) => Math.round((16000 + 4000 * Math.min(6, node.degree())) * k),
+  }).run();
+  enforceMinDistance();
+  fitAspectToCanvas();
+  fitGraph();
+  declutterLabels();
+}
+
+/** 标签去重叠：按重要度贪心放置，装不下的标签先藏起来（悬停/选中的始终显示）。 */
+function declutterLabels() {
+  const cy = state.cy;
+  if (!cy) return;
+  const zoom = cy.zoom();
+  const fs = 11;
+  const W = cy.width(), H = cy.height();
+  const placed = [];
+  const nodes = Array.prototype.slice.call(
+    cy.nodes().filter((n) => n.visible()));
+  nodes.sort((a, b) => {
+    const sa = a.data("size") || 0, sb = b.data("size") || 0;
+    if (sa !== sb) return sb - sa;                 // 重要节点优先拿到标签
+    return b.degree() - a.degree();
+  });
+  nodes.forEach((n) => {
+    const label = n.data("label") || "";
+    const p = n.renderedPosition();
+    if (!label || p.x < -120 || p.x > W + 120 || p.y < -120 || p.y > H + 120) {
+      n.removeClass("nolabel");
+      return;
+    }
+    const w = Math.min(130, label.length * fs * 0.62) * zoom;
+    const h = (fs + 6) * zoom;
+    const box = { x1: p.x - w / 2, x2: p.x + w / 2, y1: p.y + 4 * zoom, y2: p.y + 4 * zoom + h };
+    const hit = placed.some((b) => b.x1 < box.x2 && box.x1 < b.x2 && b.y1 < box.y2 && box.y1 < b.y2);
+    if (hit) n.addClass("nolabel");
+    else { n.removeClass("nolabel"); placed.push(box); }
+  });
+}
+
+function graphStyle(showRelLabels) {
+  return [
+    { selector: "node", style: {
+        "background-color": "#4a9eff", "label": "data(label)", "color": "#e6edf3",
+        "font-size": 11, "text-valign": "bottom", "text-margin-y": 6,
+        "text-wrap": "ellipsis", "text-max-width": 130,
+        "text-background-color": "#0f1419", "text-background-opacity": 0.75,
+        "text-background-padding": "2px", "text-background-shape": "roundrectangle",
+        // 缩得太小时直接不画标签，避免一坨字糊在一起
+        "min-zoomed-font-size": 9,
+        "width": "data(size)", "height": "data(size)",
+        "border-width": 1, "border-color": "#2a333d" } },
+    { selector: "node[type='knowledge_point']", style: { "background-color": "#3fb950" } },
+    { selector: "node[type='category']", style: { "background-color": "#a371f7" } },
+    { selector: "node[type='document']", style: { "background-color": "#d29922", "shape": "round-rectangle" } },
+    { selector: "node[?restricted]", style: { "border-color": "#f85149", "border-width": 2 } },
+    { selector: "node:selected", style: { "border-color": "#fff", "border-width": 3 } },
+    { selector: "node:active", style: { "border-color": "#fff", "border-width": 3 } },
+    { selector: "edge", style: { "width": 1, "line-color": "#3a4652", "curve-style": "straight",
+        "target-arrow-shape": "triangle", "target-arrow-color": "#3a4652",
+        "label": showRelLabels ? "data(rel)" : "", "font-size": 9, "color": "#c9d4df",
+        "text-rotation": "autorotate", "text-background-color": "#0f1419",
+        "text-background-opacity": 0.8, "text-background-padding": "2px" } },
+    // 悬停/选中时才显示这条关系叫什么
+    { selector: "edge.hot", style: { "label": "data(rel)", "line-color": "#58a6ff",
+        "target-arrow-color": "#58a6ff", "width": 1.8,
+        "text-background-color": "#0f1419", "text-background-opacity": 0.95 } },
+    { selector: "node.dim", style: { "opacity": 0.25 } },
+    { selector: "edge.dim", style: { "opacity": 0.12 } },
+    // 去重叠时暂时藏掉这个节点的标签
+    { selector: "node.nolabel", style: { "label": "" } },
+    // 悬停/选中的节点一定要能看清名字
+    { selector: "node:active", style: { "label": "data(label)" } },
+    { selector: "node:selected", style: { "label": "data(label)" } },
+  ];
+}
+
+/** 把全部节点缩放到可视范围内（自适应窗口大小）。 */
+function fitGraph(animate) {
+  const cy = state.cy;
+  if (!cy) return;
+  cy.resize();
+  const els = cy.elements();
+  if (!els.length) return;
+  cy.fit(els, 36, animate === false ? 0 : 200);
+}
+
 function initGraph() {
-  if (state.cy) { state.cy.resize(); return; }
+  if (state.cy) { fitGraph(); return; }
   state.cy = cytoscape({
     container: $("#cy"),
     elements: [],
-    layout: { name: "cose", animate: false, padding: 30, nodeRepulsion: 8000, idealEdgeLength: 90 },
-    style: [
-      { selector: "node", style: {
-          "background-color": "#4a9eff", "label": "data(label)", "color": "#e6edf3",
-          "font-size": 11, "text-valign": "bottom", "text-margin-y": 5,
-          "width": "data(size)", "height": "data(size)", "border-width": 1, "border-color": "#2a333d" } },
-      { selector: "node[type='knowledge_point']", style: { "background-color": "#3fb950" } },
-      { selector: "node[type='category']", style: { "background-color": "#a371f7" } },
-      { selector: "node[type='document']", style: { "background-color": "#d29922", "shape": "round-rectangle" } },
-      { selector: "node[?restricted]", style: { "border-color": "#f85149", "border-width": 2 } },
-      { selector: "node:selected", style: { "border-color": "#fff", "border-width": 3 } },
-      { selector: "edge", style: { "width": 1, "line-color": "#3a4652", "curve-style": "straight",
-          "target-arrow-shape": "triangle", "target-arrow-color": "#3a4652",
-          "label": "data(rel)", "font-size": 9, "color": "#c9d4df", "text-rotation": "autorotate",
-          "text-background-color": "#0f1419", "text-background-opacity": 0.8,
-          "text-background-padding": "2px" } },
-    ],
+    layout: GRAPH_LAYOUT,
+    style: graphStyle(false),
+    wheelSensitivity: 0.25,
   });
-  state.cy.on("tap", "node", (e) => showNode(e.target.id()));
+  const cy = state.cy;
   cyReady = true;
+
+  // 关系文字默认不画，鼠标悬停/选中时才显示对应那条
+  cy.on("mouseover", "edge", (e) => e.target.addClass("hot"));
+  cy.on("mouseout", "edge", (e) => e.target.removeClass("hot"));
+  cy.on("tap", "node", (e) => showNode(e.target.id()));
+  cy.on("layoutstop", () => {
+    if (autoFit) fitGraph();
+    declutterLabels();
+  });
+
+  // 悬停的节点永远显示名字
+  cy.on("mouseover", "node", (e) => e.target.removeClass("nolabel"));
+  cy.on("mouseout", "node", () => declutterLabels());
+
+  // 缩放/平移：只重新去重叠，**不重排**。
+  // （早先这里会"太挤就重排"，而 fit 会触发 zoom 事件 → 重排 → fit → zoom → …
+  //   形成自激循环，节点一直抖。现在布局只在加载/窗口变化/手动点击时发生。）
+  let dcTimer = 0;
+  const scheduleDeclutter = () => {
+    clearTimeout(dcTimer);
+    dcTimer = setTimeout(() => { if (state.cy) declutterLabels(); }, 120);
+  };
+  cy.on("zoom", scheduleDeclutter);
+  cy.on("pan", scheduleDeclutter);
+
+  // 画布尺寸真的变了才重排（ResizeObserver 会重复触发，用尺寸去重防抖）
+  let rzTimer = 0, lastSize = "";
+  const refit = () => {
+    clearTimeout(rzTimer);
+    rzTimer = setTimeout(() => {
+      if (!state.cy || !state.cy.nodes().length) return;
+      const key = state.cy.width() + "x" + state.cy.height();
+      if (key === lastSize) return;       // 尺寸没变就不动，节点保持稳定
+      lastSize = key;
+      autoFit = true;
+      relayout(true);
+    }, 260);
+  };
+  window.addEventListener("resize", refit);
+  // 容器自身尺寸变化（侧栏展开、工具栏换行、浏览器页面缩放）同样要重排
+  if (window.ResizeObserver) {
+    const ro = new ResizeObserver(() => refit());
+    ro.observe($("#cy"));
+  }
+
   loadGraphOverview();
 }
 
@@ -249,18 +578,22 @@ async function loadGraphOverview() {
     const r = await api("/api/v1/graph/overview?limit=60");
     cy.elements().remove();
     const ids = new Set(r.nodes.map(n => String(n.id)));
+    const total = r.nodes.length;
     const els = r.nodes.map(n => ({ data: {
       id: String(n.id), label: n.name, type: n.type,
-      size: 14 + Math.min(20, n.mentions || 0) } }));
+      size: graphNodeSize(n.mentions || 0, total) } }));
     for (const e of r.edges) {
       if (!ids.has(String(e.src)) || !ids.has(String(e.dst))) continue;
       els.push({ data: { id: e.src + "->" + e.dst + "|" + e.rel,
                          source: String(e.src), target: String(e.dst), rel: e.rel } });
     }
     cy.add(els);
-    cy.layout({ name: "cose", animate: false, padding: 30,
-                nodeRepulsion: 8000, idealEdgeLength: 90 }).run();
-    cy.fit(undefined, 40);
+    autoFit = true;
+    cy.layout(GRAPH_LAYOUT).run();
+    enforceMinDistance();
+    fitAspectToCanvas();
+    fitGraph();
+    declutterLabels();
     $("#g-side").innerHTML = r.nodes.length
       ? `<h3>知识图谱</h3>
          <div class="kv">已加载 ${r.nodes.length} 个高频节点、${r.edges.length} 条关系</div>
@@ -289,6 +622,24 @@ async function searchNodes() {
 $("#g-search").addEventListener("click", searchNodes);
 $("#g-refresh").addEventListener("click", loadGraphOverview);
 $("#g-q").addEventListener("keydown", e => { if (e.key === "Enter") searchNodes(); });
+$("#g-fit").addEventListener("click", () => { fitGraph(); declutterLabels(); });
+$("#g-layout").addEventListener("click", () => relayout(true));
+$("#g-zoom-in").addEventListener("click", () => {
+  const cy = state.cy; if (!cy) return;
+  cy.resize();
+  cy.zoom({ level: Math.min(4, cy.zoom() * 1.25), renderedPosition: { x: cy.width() / 2, y: cy.height() / 2 } });
+  declutterLabels();
+});
+$("#g-zoom-out").addEventListener("click", () => {
+  const cy = state.cy; if (!cy) return;
+  cy.resize();
+  cy.zoom({ level: Math.max(0.05, cy.zoom() / 1.25), renderedPosition: { x: cy.width() / 2, y: cy.height() / 2 } });
+  declutterLabels();
+});
+$("#g-rel-label").addEventListener("change", (e) => {
+  const cy = state.cy; if (!cy) return;
+  cy.style(graphStyle(e.target.checked));
+});
 
 async function expandNode(id, replace) {
   try {
@@ -297,17 +648,20 @@ async function expandNode(id, replace) {
     if (replace) cy.elements().remove();
     const existing = new Set(cy.nodes().map(n => n.id()));
     const els = [];
+    const total = cy.nodes().length + r.nodes.length;
     for (const n of r.nodes) {
       if (!existing.has(String(n.id))) {
-        els.push({ data: { id: String(n.id), label: n.name, type: n.type, size: 14 + Math.min(20, n.mentions || 0) } });
+        els.push({ data: { id: String(n.id), label: n.name, type: n.type,
+                           size: graphNodeSize(n.mentions || 0, total) } });
       }
     }
     for (const e of r.edges) {
       els.push({ data: { id: e.src + "->" + e.dst + "|" + e.rel, source: String(e.src), target: String(e.dst), rel: e.rel } });
     }
     cy.add(els);
-    cy.layout({ name: "cose", animate: true, animationDuration: 400, padding: 30,
-                nodeRepulsion: 8000, idealEdgeLength: 90 }).run();
+    cy.layout({ ...GRAPH_LAYOUT, animate: true, animationDuration: 400 }).run();
+    enforceMinDistance();
+    declutterLabels();
     const node = cy.getElementById(String(id));
     if (node.length) cy.center(node);
     showNode(id);
@@ -412,6 +766,7 @@ async function adminUsers(body) {
   const cnt = {};
   for (const t of tok.tokens) cnt[t.user_id] = (cnt[t.user_id] || 0) + 1;
   state.tokenCounts = cnt;
+  state.adminUsers = r.users || [];
   body.innerHTML = `
     <div class="form-row">
       <label>用户名<input id="nu-name" class="inline"></label>
@@ -433,12 +788,60 @@ async function adminUsers(body) {
             (u.role === "admin" ? '<span class="muted">（全部）</span>'
                                  : '<span class="muted">（未授权）</span>')}</td>
       <td>${u.active ? '<span class="muted">启用</span>' : '<span class="err">已停用</span>'}</td>
-      <td><button class="sm" onclick="KB.adminSources.openGrants(${u.id})">目录授权</button>
+      <td><button class="sm" onclick="editUser(${u.id})">编辑</button>
+         <button class="sm" onclick="KB.adminSources.openGrants(${u.id})">目录授权</button>
          <button class="sm" onclick="grantUser(${u.id})">旧范围</button>
          <button class="sm" onclick="filterTokensOf(${u.id})">密钥 ${tokenCount(u.id)}</button>
          <button class="sm" onclick="toggleActive(${u.id},${u.active ? 0 : 1})">${u.active ? "停用" : "启用"}</button></td></tr>`).join("")}
     </tbody></table>`;
 }
+
+/* 修改用户信息：显示名 / 角色 / 部门 / 启用状态，可选重置密码 */
+window.editUser = (id) => {
+  const u = (state.adminUsers || []).find((x) => x.id === id);
+  if (!u) { toast("找不到该用户"); return; }
+  openModal(`<h3 style="margin:0 0 10px">修改用户信息</h3>
+    <p class="muted" style="font-size:12px">用户名（登录标识）不可修改。</p>
+    <div class="src-grid">
+      <label>用户名<input value="${esc(u.username)}" disabled></label>
+      <label>显示名<input id="eu-disp" value="${esc(u.display_name || "")}"></label>
+      <label>部门<input id="eu-dept" value="${esc(u.dept || "")}"></label>
+      <label>角色<select id="eu-role">
+        <option value="user" ${u.role === "user" ? "selected" : ""}>普通用户</option>
+        <option value="admin" ${u.role === "admin" ? "selected" : ""}>管理员</option>
+      </select></label>
+      <label>状态<select id="eu-active">
+        <option value="1" ${u.active ? "selected" : ""}>启用</option>
+        <option value="0" ${u.active ? "" : "selected"}>停用</option>
+      </select></label>
+      <label>重置密码（留空=不改）<input id="eu-pass" type="password" placeholder="至少 8 位"></label>
+    </div>
+    <div class="src-actions">
+      <button id="eu-save" class="primary">保存</button>
+      <span id="eu-msg" class="err"></span>
+    </div>`);
+  $("#eu-save").onclick = async () => {
+    const btn = $("#eu-save");
+    btn.disabled = true;
+    const body = {
+      display_name: $("#eu-disp").value.trim(),
+      dept: $("#eu-dept").value.trim(),
+      role: $("#eu-role").value,
+      active: $("#eu-active").value === "1",
+    };
+    const pwd = $("#eu-pass").value;
+    if (pwd) body.password = pwd;
+    try {
+      await api(`/api/v1/admin/users/${id}`, { method: "PUT", body });
+      closeModal();
+      toast("已保存");
+      loadAdmin();
+    } catch (e) {
+      const msg = $("#eu-msg");
+      if (msg) msg.textContent = e.message;
+    } finally { btn.disabled = false; }
+  };
+};
 window.createUser = async () => {
   try {
     await api("/api/v1/admin/users", { method: "POST", body: {

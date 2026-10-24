@@ -46,8 +46,29 @@ def test_view_switch_sort_and_group_controls_present():
     assert "kb.files.view" in js, "视图/排序/分组偏好要按浏览器记住"
 
 
-def test_sort_group_logic_behaviour():
-    """排序/分组是纯函数，直接跑逻辑断言行为。"""
+def test_board_context_menu_and_user_edit_ui():
+    """看板右键菜单（查看/定位/下载）与用户信息编辑入口。"""
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    assert 'id="doc-ctx"' in html
+    js = (WEB / "static" / "app.js").read_text(encoding="utf-8")
+    assert "showDocMenu" in js
+    for act in ("view", "locate", "download"):
+        assert f'data-act="{act}"' in js, f"右键菜单缺少 {act}"
+    assert "/api/v1/documents/" in js and "/file" in js
+    assert "window.editUser" in js
+    assert "openAt" in (WEB / "static" / "files.js").read_text(encoding="utf-8")
+
+
+def test_graph_layout_is_stable_and_scales_node_size():
+    """图谱：布局要稳定（不因缩放自激重排）、节点随点数自动缩小、标签去重叠。"""
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    for i in ("g-fit", "g-layout", "g-zoom-in", "g-zoom-out", "g-rel-label"):
+        assert f'id="{i}"' in html
+    js = (WEB / "static" / "app.js").read_text(encoding="utf-8")
+    assert "graphNodeSize" in js, "节点直径要随节点数自适应"
+    assert "enforceMinDistance" in js, "要有最小间距约束，避免节点互相压"
+    assert "declutterLabels" in js, "标签要去重叠"
+    assert "fitAspectToCanvas" in js, "布局要按画布长宽比铺开"
     import subprocess
     import sys
 

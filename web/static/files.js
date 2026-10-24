@@ -289,6 +289,21 @@ window.KB = window.KB || {};
     }
   }
 
+  /** 从看板跳过来：打开某个文件所在的目录，可选直接预览。 */
+  async function openAt(sourceId, rel, previewIt) {
+    rel = rel || "";
+    const dir = parentRel(rel);
+    await open(Number(sourceId), dir);
+    const hit = state.entries.find((e) => e.rel === rel);
+    if (hit) {
+      selectOnly(hit);
+      if (previewIt) preview(hit);
+      else toast("已定位到文件所在目录");
+    } else {
+      toast("目录已打开，但列表里没找到该文件（可能已被移动）");
+    }
+  }
+
   function renderCrumbs(crumbs) {
     const box = $("#fm-crumbs");
     if (!box) return;
@@ -906,7 +921,7 @@ window.KB = window.KB || {};
   }
 
   KB.files = {
-    load, open, refresh: () => open(state.sourceId, state.rel),
+    load, open, openAt, refresh: () => open(state.sourceId, state.rel),
     preview, closePreview, upload, deleteSelected,
     getState: () => state,
   };
