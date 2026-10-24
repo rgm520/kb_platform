@@ -1229,25 +1229,50 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
         return {"ok": True}
 
     @app.get("/api/v1/admin/tokens")
-    def admin_tokens(ctx=Depends(require_admin)):
-        rows = conn.execute(
-            "SELECT t.id,t.user_id,u.username,t.prefix,t.label,t.revoked,t.created_at,"
-            "t.last_used_at,t.expires_at,"
-            "(t.token_enc IS NOT NULL) AS recoverable FROM api_tokens t "
-            "JOIN users u ON u.id=t.user_id"
-            " ORDER BY t.revoked ASC, t.id DESC").fetchall()
+    def admin_tokens(ctx=Depends(actor)):
+        """密钥列表：管理员看全部，普通用户只看自己的（可以给自己开密钥）。"""
+        u = ctx["user"]
+        sql = ("SELECT t.id,t.user_id,u.username,t.prefix,t.label,t.revoked,t.created_at,"
+               "t.last_used_at,t.expires_at,"
+               "(t.token_enc IS NOT NULL) AS recoverable FROM api_tokens t "
+               "JOIN users u ON u.id=t.user_id")
+        params: list = []
+        if u["role"] != "admin":
+            sql += " WHERE t.user_id=?"
+            params.append(int(u["id"]))
+        sql += " ORDER BY t.revoked ASC, t.id DESC"
+        rows = conn.execute(sql, params).fetchall()
         return {"tokens": [dict(r) for r in rows]}
 
     @app.post("/api/v1/admin/tokens")
     def admin_issue_token(req: TokenReq, user_id: int = 0,
-                          ctx=Depends(require_admin)):
-        raw, tid = auth.issue_token(conn, user_id, req.label, req.ttl_days)
+                          ctx=Depends(actor)):
+        """签发密钥。普通用户只能给自己签发，管理员可以给任意用户签发。"""
+        u = ctx["user"]
+        target = int(user_id or 0) or int(u["id"])
+        if u["role"] != "admin" and target != int(u["id"]):
+            raise HTTPException(403, detail="只能给自己签发密钥")
+        raw, tid = auth.issue_token(conn, target, req.label, req.ttl_days)
         return {"id": tid, "token": raw,
                 "notice": "这是唯一一次显示明文 token，请立即交给用户"}
 
+    @app.get("/api/v1/admin/agents")
+    def admin_agents(ctx=Depends(actor)):
+        """已接入智能体：管理员看全部；普通用户只看自己账号密钥接入的。"""
+        u = ctx["user"]
+        sql = ("SELECT a.id,a.user_id,u.username,a.name,a.kind,a.client_id,"
+               "a.created_at,a.last_seen_at FROM agents a LEFT JOIN users u ON u.id=a.user_id")
+        params: list = []
+        if u["role"] != "admin":
+            sql += " WHERE a.user_id=?"
+            params.append(int(u["id"]))
+        sql += " ORDER BY a.id"
+        rows = conn.execute(sql, params).fetchall()
+        return {"agents": [dict(r) for r in rows]}
+
     @app.get("/api/v1/admin/tokens/{token_id}/plaintext")
     def admin_token_plaintext(request: Request, token_id: int,
-                              ctx=Depends(require_admin)):
+                              ctx=Depends(actor)):
         """重新查看某枚密钥的**完整明文**。
 
         密钥除了哈希还存了 AES-GCM 密文（密钥由 session_secret 派生），
@@ -1261,6 +1286,8 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
                            (token_id,)).fetchone()
         if row is None:
             raise HTTPException(404, detail="密钥不存在")
+        if ctx["user"]["role"] != "admin" and int(row["user_id"]) != int(ctx["user"]["id"]):
+            raise HTTPException(403, detail="只能查看自己的密钥")
         plain = auth.token_plaintext(conn, token_id)
         if not plain:
             raise HTTPException(
@@ -1275,16 +1302,19 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
                 "notice": "密钥明文可再次查看——请直接复制给客户端，不要转述前缀。"}
 
     @app.delete("/api/v1/admin/tokens/{token_id}")
-    def admin_revoke_token(token_id: int, ctx=Depends(require_admin)):
-        """吊销密钥。幂等；已吊销的再调一次不会报错。"""
-        row = conn.execute("SELECT revoked FROM api_tokens WHERE id=?", (token_id,)).fetchone()
+    def admin_revoke_token(token_id: int, ctx=Depends(actor)):
+        """吊销密钥。幂等；已吊销的再调一次不会报错。普通用户只能吊销自己的。"""
+        row = conn.execute("SELECT revoked, user_id FROM api_tokens WHERE id=?",
+                           (token_id,)).fetchone()
         if row is None:
             raise HTTPException(404, detail="密钥不存在")
+        if ctx["user"]["role"] != "admin" and int(row["user_id"]) != int(ctx["user"]["id"]):
+            raise HTTPException(403, detail="只能吊销自己的密钥")
         auth.revoke_token(conn, token_id)
         return {"ok": True, "revoked": True}
 
     @app.delete("/api/v1/admin/tokens/{token_id}/purge")
-    def admin_purge_token(token_id: int, ctx=Depends(require_admin)):
+    def admin_purge_token(token_id: int, ctx=Depends(actor)):
         """物理删除密钥记录。
 
         **只允许删除已吊销的**——必须先吊销再删除，避免"点一下就永久消失"
@@ -1294,6 +1324,8 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
                            (token_id,)).fetchone()
         if row is None:
             raise HTTPException(404, detail="密钥不存在")
+        if ctx["user"]["role"] != "admin" and int(row["user_id"]) != int(ctx["user"]["id"]):
+            raise HTTPException(403, detail="只能删除自己的密钥")
         if not row["revoked"]:
             raise HTTPException(400, detail="请先吊销该密钥，再执行删除")
         conn.execute("DELETE FROM api_tokens WHERE id=?", (token_id,))
@@ -1311,11 +1343,18 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
         return {"ok": models_mod.delete_model(conn, model_id)}
 
     @app.get("/api/v1/admin/audit")
-    def admin_audit(limit: int = 100, ctx=Depends(require_admin)):
-        rows = conn.execute(
-            "SELECT a.id,u.username,a.token_prefix,a.action,a.question,a.model_used,"
-            "a.restricted,a.created_at FROM audit_log a LEFT JOIN users u ON u.id=a.user_id"
-            " ORDER BY a.id DESC LIMIT ?", (limit,)).fetchall()
+    def admin_audit(limit: int = 100, ctx=Depends(actor)):
+        """调用审计：管理员看全部；普通用户只看自己账号（密钥/智能体）产生的记录。"""
+        u = ctx["user"]
+        sql = ("SELECT a.id,u.username,a.token_prefix,a.action,a.question,a.model_used,"
+               "a.restricted,a.created_at FROM audit_log a LEFT JOIN users u ON u.id=a.user_id")
+        params: list = []
+        if u["role"] != "admin":
+            sql += " WHERE a.user_id=?"
+            params.append(int(u["id"]))
+        sql += " ORDER BY a.id DESC LIMIT ?"
+        params.append(max(1, min(1000, limit)))
+        rows = conn.execute(sql, params).fetchall()
         return {"audit": [dict(r) for r in rows]}
 
     # ============================================================ 健康检查

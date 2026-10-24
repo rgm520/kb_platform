@@ -50,9 +50,15 @@ function showMain(user) {
   $("#main").classList.remove("hidden");
   $("#who").textContent = (user.display_name || user.username) + (user.role === "admin" ? "（管理员）" : "");
   $$(".admin-only").forEach(e => e.classList.toggle("hidden", user.role !== "admin"));
+  // 管理台默认页签：管理员进「用户与权限」，普通用户进「API 密钥」
+  setAdminTab(user.role === "admin" ? "users" : "tokens");
   loadModels();
   if (!location.hash || location.hash === "#/board") location.hash = "#/desktop";
   route();
+}
+function setAdminTab(tab) {
+  state.adminTab = tab;
+  $$("#p-admin .tabs button").forEach(x => x.classList.toggle("active", x.dataset.t === tab));
 }
 $("#login-form").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -798,23 +804,27 @@ document.addEventListener("click", (e) => {
 });
 
 /* ---------------------------------------------------------- 管理台 */
-$$(".tabs button").forEach(b => b.addEventListener("click", () => {
-  $$(".tabs button").forEach(x => x.classList.toggle("active", x === b));
-  state.adminTab = b.dataset.t;
+$$("#p-admin .tabs button").forEach(b => b.addEventListener("click", () => {
+  setAdminTab(b.dataset.t);
   loadAdmin();
 }));
 
 async function loadAdmin() {
   const body = $("#admin-body");
   body.innerHTML = '<p class="muted">加载中…</p>';
+  // 普通用户没有管理员专属页签，落在这些页签上时回退到「API 密钥」
+  const adminOnlyTabs = ["users", "sources", "models"];
+  if (state.role !== "admin" && adminOnlyTabs.includes(state.adminTab)) {
+    state.adminTab = "tokens";
+  }
   try {
-    if (state.adminTab === "users") return adminUsers(body);
-    if (state.adminTab === "sources") return KB.adminSources.render(body);
-    if (state.adminTab === "restricted") return adminRestricted(body);
-    if (state.adminTab === "models") return adminModels(body);
     if (state.adminTab === "tokens") return adminTokens(body);
     if (state.adminTab === "agents") return adminAgents(body);
     if (state.adminTab === "audit") return adminAudit(body);
+    if (state.adminTab === "users") return adminUsers(body);
+    if (state.adminTab === "sources") return KB.adminSources.render(body);
+    if (state.adminTab === "models") return adminModels(body);
+    if (state.adminTab === "restricted") return adminRestricted(body);
   } catch (e) { body.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
 }
 
@@ -1018,8 +1028,7 @@ window.saveScopes = async (id) => {
 window.issueTokenFor = async (uid, name) => {
   // 兼容旧入口：统一走 API 密钥页的签发表单
   state.tokenUserFilter = uid;
-  state.adminTab = "tokens";
-  $$(".tabs button").forEach(x => x.classList.toggle("active", x.dataset.t === "tokens"));
+  setAdminTab("tokens");
   await loadAdmin();
   const sel = $("#tk-user");
   if (sel) sel.value = String(uid);
@@ -1244,9 +1253,10 @@ window.delModel = async (id) => {
    生命周期：签发 -> 吊销 -> 删除。 */
 
 async function adminTokens(body) {
+  const isAdmin = state.role === "admin";
   const [tok, usr] = await Promise.all([
     api("/api/v1/admin/tokens"),
-    api("/api/v1/admin/users"),
+    isAdmin ? api("/api/v1/admin/users") : Promise.resolve({ users: [] }),
   ]);
   const byUser = {};
   for (const t of tok.tokens) {
@@ -1254,12 +1264,17 @@ async function adminTokens(body) {
   }
   const cur = state.tokenUserFilter;
   const shown = cur ? tok.tokens.filter(t => t.user_id === cur) : tok.tokens;
-  const uname = id => (usr.users.find(u => u.id === id) || {}).username || ("#" + id);
+  const me = state.user || {};
+  const uname = id => (usr.users.find(u => u.id === id) || {}).username
+    || (id === me.id ? me.username : ("#" + id));
+  const userPicker = isAdmin
+    ? `<label>用户<select id="tk-user">${usr.users.map(u =>
+        `<option value="${u.id}"${cur === u.id ? " selected" : ""}>${esc(u.display_name || u.username)} (${esc(u.username)})</option>`).join("")}</select></label>`
+    : `<label>账号<input class="inline" value="${esc(me.username || "")}" disabled></label>`;
 
   body.innerHTML = `
     <div class="form-row">
-      <label>用户<select id="tk-user">${usr.users.map(u =>
-        `<option value="${u.id}"${cur === u.id ? " selected" : ""}>${esc(u.display_name || u.username)} (${esc(u.username)})</option>`).join("")}</select></label>
+      ${userPicker}
       <label>备注<input id="tk-label" class="inline" placeholder="如：WorkBuddy 接入 / 自动化脚本" value="${esc(state.tokenLabel || "")}"></label>
       <label>有效期(天)<input id="tk-ttl" class="inline" type="number" value="90" min="1"></label>
       <button class="primary" onclick="issueToken()">签发密钥</button>
@@ -1343,13 +1358,15 @@ window.downloadGuide = () => {
   toast("已下载 企业知识库-API接入说明.md");
 };
 window.issueToken = async () => {
-  const uid = Number($("#tk-user").value);
+  const sel = $("#tk-user");
+  const uid = sel ? Number(sel.value) : 0;   // 普通用户没有选择框 → 签给自己
+  const who = sel ? sel.selectedOptions[0].textContent : ((state.user || {}).username || "我");
   const label = $("#tk-label").value.trim();
   const ttl = Number($("#tk-ttl").value) || 90;
   try {
-    const r = await api(`/api/v1/admin/tokens?user_id=${uid}`, { method: "POST",
-      body: { label: label || null, ttl_days: ttl } });
-    showTokenModal(r.token, $("#tk-user").selectedOptions[0].textContent, true);
+    const r = await api(uid ? `/api/v1/admin/tokens?user_id=${uid}` : "/api/v1/admin/tokens",
+      { method: "POST", body: { label: label || null, ttl_days: ttl } });
+    showTokenModal(r.token, who, true);
     state.tokenLabel = "";
     loadAdmin();
   } catch (e) { toast("签发失败: " + e.message); }
@@ -1406,8 +1423,7 @@ window.copyText = async (txt) => {
 };
 window.filterTokensOf = (uid) => {
   state.tokenUserFilter = uid;
-  state.adminTab = "tokens";
-  $$(".tabs button").forEach(x => x.classList.toggle("active", x.dataset.t === "tokens"));
+  setAdminTab("tokens");
   loadAdmin();
 };
 window.clearTokenFilter = () => { state.tokenUserFilter = null; loadAdmin(); };
@@ -1422,10 +1438,11 @@ window.purgeToken = async (id) => {
 };
 
 async function adminAgents(body) {
-  const r = await api("/api/v1/agents");
+  const r = await api("/api/v1/admin/agents");
+  const isAdmin = state.role === "admin";
   body.innerHTML = r.agents.length
-    ? `<table><thead><tr><th>ID</th><th>名称</th><th>类型</th><th>客户端</th><th>注册时间</th><th>最后活跃</th></tr></thead><tbody>
-       ${r.agents.map(a => `<tr><td>${a.id}</td><td>${esc(a.name)}</td><td>${esc(a.kind || "")}</td>
+    ? `<table><thead><tr>${isAdmin ? "<th>所属账号</th>" : ""}<th>ID</th><th>名称</th><th>类型</th><th>客户端</th><th>注册时间</th><th>最后活跃</th></tr></thead><tbody>
+       ${r.agents.map(a => `<tr>${isAdmin ? `<td class="muted">${esc(a.username || "")}</td>` : ""}<td>${a.id}</td><td>${esc(a.name)}</td><td>${esc(a.kind || "")}</td>
          <td class="muted">${esc(a.client_id || "")}</td><td class="muted">${fmtTime(a.created_at)}</td>
          <td class="muted">${fmtTime(a.last_seen_at)}</td></tr>`).join("")}</tbody></table>`
     : '<p class="muted">还没有智能体接入。把 API 密钥交给 WorkBuddy 后，它注册时会出现在这里。</p>';

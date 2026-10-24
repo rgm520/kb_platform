@@ -48,7 +48,7 @@
         <a href="#/board" data-p="board">文档看板</a>
         <a href="#/graph" data-p="graph">知识图谱</a>
         <a href="#/ask" data-p="ask">AI 问答</a>
-        <a href="#/admin" data-p="admin" class="admin-only">管理台</a>
+        <a href="#/admin" data-p="admin">管理台</a>
       </nav>
       <div class="right">
         <span id="who" class="muted"></span>
@@ -84,9 +84,9 @@
           <span class="desk-icon">♻</span>
           <strong>回收站</strong><small>恢复误删的文件</small>
         </button>
-        <button class="desk-card admin-only" data-open="admin">
+        <button class="desk-card" data-open="admin">
           <span class="desk-icon">⚙</span>
-          <strong>管理台</strong><small>存储接入、用户与授权</small>
+          <strong>管理台</strong><small>密钥、智能体与审计</small>
         </button>
       </div>
     </section>
@@ -242,12 +242,12 @@
     <!-- 管理台 -->
     <section id="p-admin" class="page">
       <div class="tabs">
-        <button data-t="users" class="active">用户与权限</button>
-        <button data-t="sources">存储接入</button>
-        <button data-t="models">模型配置</button>
         <button data-t="tokens">API 密钥</button>
         <button data-t="agents">已接入智能体</button>
         <button data-t="audit">调用审计</button>
+        <button data-t="users" class="admin-only">用户与权限</button>
+        <button data-t="sources" class="admin-only">存储接入</button>
+        <button data-t="models" class="admin-only">模型配置</button>
       </div>
       <div id="admin-body" class="admin-body"></div>
     </section>
