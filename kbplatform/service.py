@@ -507,12 +507,13 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
         out = []
         for r in rows:
             # 节点可见性 = 其关联的知识记录至少有一条在范围内
+            # （document 类型也按同一标准判定，避免泄露范围外的文件名）
             ok = conn.execute(
                 f"""SELECT 1 FROM edges e JOIN chunks ch ON ch.id=e.chunk_id
                     JOIN catalog c ON c.path=ch.file_path
                     WHERE (e.src=? OR e.dst=?) AND {pred} LIMIT 1""",
                 [r[0], r[0]] + params).fetchone()
-            if ok is None and r[2] != "document":
+            if ok is None:
                 continue
             out.append({"id": r[0], "name": r[1], "type": r[2], "mentions": r[3]})
         return {"nodes": out}

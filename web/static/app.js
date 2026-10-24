@@ -603,9 +603,12 @@ async function loadGraphOverview() {
     $("#g-side").innerHTML = r.nodes.length
       ? `<h3>知识图谱</h3>
          <div class="kv">已加载 ${r.nodes.length} 个高频节点、${r.edges.length} 条关系</div>
+         ${state.role === "admin" ? "" : '<div class="kv">只显示你授权目录内的图谱</div>'}
          <div class="kv">点击节点查看详情，或用上方搜索定位</div>`
       : `<h3>知识图谱</h3>
-         <div class="muted">还没有图谱数据，Tier 2 提炼完成后会自动出现。</div>`;
+         ${state.role === "admin"
+            ? '<div class="muted">还没有图谱数据，Tier 2 提炼完成后会自动出现。</div>'
+            : '<div class="muted">你的授权目录里还没有图谱数据。<br>授权更多目录，或等文档解析提炼完成。</div>'}`;
   } catch (e) { toast("图谱加载失败: " + e.message); }
 }
 
