@@ -6,7 +6,8 @@ window.KB = window.KB || {};
 
   const state = {
     sources: [], sourceId: null, sourceName: "", rel: "", entries: [],
-    canWrite: false, selected: new Set(), lastIndex: -1,
+    byRel: new Map(), viewOrder: [], collapsed: new Set(),
+    canWrite: false, selected: new Set(), lastRel: "",
     search: [], searchIndex: -1, searchTimer: 0, ctxEntry: null,
     uploads: 0,
   };
@@ -16,14 +17,32 @@ window.KB = window.KB || {};
   const VIDEO = new Set(["mp4", "webm", "ogg", "mov", "m4a", "mp3", "wav"]);
   const OFFICE = new Set(["docx", "xlsx", "pptx", "doc", "xls", "ppt", "ofd", "pdf"]);
 
-  const extOf = (name) => (String(name).split(".").pop() || "").toLowerCase();
   const parentRel = (rel) => (rel && rel.includes("\\") ? rel.slice(0, rel.lastIndexOf("\\")) : "");
   const passes = (rel) => rel.split("\\").map(encodeURIComponent).join("/");
   const previewUrl = (sourceId, rel) =>
     `/api/v1/fs/preview?source_id=${encodeURIComponent(sourceId)}&rel=${passes(rel)}`;
   const downloadUrl = (sourceId, rel) =>
     `/api/v1/fs/download?source_id=${encodeURIComponent(sourceId)}&rel=${passes(rel)}`;
-  const iconOf = (e) => e.is_dir ? "▸" : (extOf(e.name) === "pdf" ? "▤" : "▧");
+
+  /* ------------------------------------------------------------ 视图偏好
+     图标/列表视图、排序、分组都按浏览器记住（同一台电脑保持习惯）。 */
+  const VIEW_KEY = "kb.files.view";
+  const view = { mode: "list", sortKey: "mtime", sortDir: "desc", groupBy: "none" };
+
+  function loadView() {
+    try {
+      const raw = localStorage.getItem(VIEW_KEY);
+      if (!raw) return;
+      const v = JSON.parse(raw) || {};
+      if (v.mode === "icons" || v.mode === "list") view.mode = v.mode;
+      if (["name", "size", "ext", "mtime"].includes(v.sortKey)) view.sortKey = v.sortKey;
+      if (v.sortDir === "asc" || v.sortDir === "desc") view.sortDir = v.sortDir;
+      if (["none", "name", "ext", "size", "mtime"].includes(v.groupBy)) view.groupBy = v.groupBy;
+    } catch (e) { /* 偏好坏了就用默认值 */ }
+  }
+  function saveView() {
+    try { localStorage.setItem(VIEW_KEY, JSON.stringify(view)); } catch (e) { }
+  }
 
   function fmtSize(n) {
     n = Number(n || 0);
@@ -37,6 +56,154 @@ window.KB = window.KB || {};
     const map = { done: "可搜索", pending: "解析中", failed: "解析失败", skipped: "已跳过" };
     return `<span class="fm-badge ${esc(status)}">${esc(map[status] || status)}</span>`;
   }
+
+  /* ------------------------------------------------------------ 排序与分组（纯逻辑）
+     这段不依赖 DOM，可以被单独抽出来跑断言。 */
+  /* ===== VIEW_LOGIC_START ===== */
+
+  const TYPE_COLORS = {
+    doc: "#2b5797", sheet: "#217346", slides: "#c43e1c", pdf: "#c50f1f",
+    text: "#5b6770", image: "#0f9d8f", video: "#7c3aed", audio: "#d81b60",
+    archive: "#b45309", code: "#0b7285", default: "#64748b",
+  };
+  const TYPE_NAMES = {
+    doc: "文档", sheet: "表格", slides: "演示", pdf: "PDF", text: "文本",
+    image: "图片", video: "视频", audio: "音频", archive: "压缩包", code: "代码",
+    default: "文件",
+  };
+
+  function typeOf(name) {
+    const x = extOf(name);
+    if (["doc", "docx", "rtf", "odt"].includes(x)) return "doc";
+    if (["xls", "xlsx", "csv", "ods"].includes(x)) return "sheet";
+    if (["ppt", "pptx", "odp"].includes(x)) return "slides";
+    if (x === "pdf") return "pdf";
+    if (["txt", "md", "log", "ini", "yaml", "yml"].includes(x)) return "text";
+    if (["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "ico", "tif", "tiff"].includes(x)) return "image";
+    if (["mp4", "mov", "avi", "mkv", "wmv", "flv", "webm"].includes(x)) return "video";
+    if (["mp3", "wav", "m4a", "flac", "aac"].includes(x)) return "audio";
+    if (["zip", "rar", "7z", "tar", "gz", "bz2"].includes(x)) return "archive";
+    if (["py", "js", "ts", "json", "xml", "html", "htm", "css", "java", "go", "sql", "sh"].includes(x)) return "code";
+    return "default";
+  }
+
+  function typeLabel(e) {
+    const x = extOf(e.name);
+    if (!x) return "文件";
+    return x.toUpperCase();
+  }
+
+  /** 文件图标：文件夹是黄色文件夹，其它按类型上色并标扩展名（Windows 风格）。 */
+  function fileIcon(e) {
+    if (e.is_dir) {
+      return `<svg class="ico ico-dir" viewBox="0 0 32 32" aria-hidden="true">
+        <path d="M3 7h9l3 3h14v18H3z" fill="#e0a92c" stroke="#b98613" stroke-width="1"/>
+        <path d="M3 13h26v15H3z" fill="#f7c948" stroke="#b98613" stroke-width="1"/></svg>`;
+    }
+    const t = typeOf(e.name);
+    const color = TYPE_COLORS[t] || TYPE_COLORS.default;
+    const tag = extOf(e.name).toUpperCase().slice(0, 4) || "";
+    return `<svg class="ico" viewBox="0 0 32 32" aria-hidden="true">
+      <path d="M6 2h12l8 8v20H6z" fill="#eef2f6" stroke="#9fb0c0" stroke-width="1"/>
+      <path d="M18 2l8 8h-8z" fill="#c9d6e2" stroke="#9fb0c0" stroke-width="1"/>
+      <rect x="6" y="22" width="20" height="8" rx="1.5" fill="${color}"/>
+      <text x="16" y="28" font-size="6.2" text-anchor="middle" fill="#ffffff"
+        font-family="Segoe UI,Arial,sans-serif">${esc(tag)}</text></svg>`;
+  }
+
+  /** 首字母分组：英文取字母，中文按拼音首字母，数字/符号单独一段。 */
+  function initialOf(name) {
+    const s = String(name || "").trim();
+    if (!s) return "#";
+    const ch = s[0];
+    if (/[a-zA-Z]/.test(ch)) return ch.toUpperCase();
+    if (/[0-9]/.test(ch)) return "0-9";
+    let lo = 0, hi = 25, ans = 25;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (collator.compare(ch, String.fromCharCode(65 + mid)) >= 0) { ans = mid; lo = mid + 1; }
+      else hi = mid - 1;
+    }
+    return String.fromCharCode(65 + ans);
+  }
+
+  /** 排序：文件夹永远排在文件前面，其余按指定字段升降序。 */
+  function sortEntries(entries, key, dir) {
+    const sign = dir === "asc" ? 1 : -1;
+    return (entries || []).slice().sort((a, b) => {
+      if (!!a.is_dir !== !!b.is_dir) return a.is_dir ? -1 : 1;
+      let r = 0;
+      if (key === "size") r = (a.size || 0) - (b.size || 0);
+      else if (key === "mtime") r = (a.mtime || 0) - (b.mtime || 0);
+      else if (key === "ext") r = collator.compare(extOf(a.name), extOf(b.name));
+      else r = collator.compare(a.name, b.name);
+      if (r === 0) r = collator.compare(a.name, b.name);
+      return r * sign;
+    });
+  }
+
+  const SIZE_BUCKETS = [
+    [1024, "小于 1 KB"],
+    [10 * 1024, "1 KB – 10 KB"],
+    [100 * 1024, "10 KB – 100 KB"],
+    [1024 * 1024, "100 KB – 1 MB"],
+    [10 * 1024 * 1024, "1 MB – 10 MB"],
+    [100 * 1024 * 1024, "10 MB – 100 MB"],
+    [Infinity, "大于 100 MB"],
+  ];
+
+  function groupKeyOf(e, groupBy) {
+    if (groupBy === "name") return initialOf(e.name);
+    if (groupBy === "ext") {
+      const x = extOf(e.name);
+      return x ? x.toUpperCase() : "无扩展名";
+    }
+    if (groupBy === "size") {
+      const n = e.size || 0;
+      for (const [lim, label] of SIZE_BUCKETS) if (n < lim) return label;
+      return SIZE_BUCKETS[SIZE_BUCKETS.length - 1][1];
+    }
+    if (groupBy === "mtime") {
+      if (!e.mtime) return "未知时间";
+      const d = new Date(e.mtime * 1000);
+      return `${d.getFullYear()} 年 ${d.getMonth() + 1} 月`;
+    }
+    return "";
+  }
+
+  /** 分组：文件夹单独一组在前，其余按分组键分段。 */
+  function groupEntries(entries, groupBy, sortKey, sortDir) {
+    const sorted = sortEntries(entries, sortKey, sortDir);
+    if (!groupBy || groupBy === "none") return [{ label: "", items: sorted }];
+    const dirs = sorted.filter((e) => e.is_dir);
+    const files = sorted.filter((e) => !e.is_dir);
+    const buckets = new Map();
+    for (const e of files) {
+      const k = groupKeyOf(e, groupBy);
+      if (!buckets.has(k)) buckets.set(k, []);
+      buckets.get(k).push(e);
+    }
+    let keys = [...buckets.keys()];
+    if (groupBy === "size") {
+      keys = SIZE_BUCKETS.map((b) => b[1]).filter((k) => buckets.has(k));
+    } else if (groupBy === "mtime") {
+      keys.sort((a, b) => {
+        const ta = Math.max(...buckets.get(a).map((e) => e.mtime || 0));
+        const tb = Math.max(...buckets.get(b).map((e) => e.mtime || 0));
+        return tb - ta;
+      });
+    } else {
+      keys.sort((a, b) => collator.compare(a, b));
+    }
+    const groups = [];
+    if (dirs.length) groups.push({ label: "文件夹", items: dirs, kind: "dirs" });
+    for (const k of keys) groups.push({ label: k, items: buckets.get(k) });
+    return groups;
+  }
+
+  const collator = new Intl.Collator("zh-Hans-u-co-pinyin", { numeric: true, sensitivity: "base" });
+  const extOf = (name) => (String(name).split(".").pop() || "").toLowerCase();
+  /* ===== VIEW_LOGIC_END ===== */
 
   /* ------------------------------------------------------------ 左侧源 */
   function renderSources() {
@@ -104,12 +271,15 @@ window.KB = window.KB || {};
       state.sourceName = r.source.name;
       state.rel = r.rel || "";
       state.entries = r.entries || [];
+      state.byRel = new Map(state.entries.map((e) => [e.rel, e]));
       state.canWrite = !!r.can_write;
       state.selected.clear();
-      state.lastIndex = -1;
+      state.lastRel = "";
+      state.collapsed.clear();
       renderSources();
       renderCrumbs(r.breadcrumb || []);
-      renderList();
+      bindViewControls();
+      setViewMode(view.mode);
       $("#fm-upload").disabled = !state.canWrite;
       $("#fm-upload").title = state.canWrite ? "" : "当前目录没有写权限";
       hideSearch();
@@ -134,33 +304,94 @@ window.KB = window.KB || {};
 
   function renderEmpty(msg) {
     const box = $("#fm-list");
-    if (box) box.innerHTML = `<tr><td colspan="5"><div class="fm-empty">${esc(msg)}</div></td></tr>`;
+    if (box) box.innerHTML = `<tr><td colspan="6"><div class="fm-empty">${esc(msg)}</div></td></tr>`;
   }
 
+  /* ------------------------------------------------------------ 列表渲染（表格 / 图标） */
   function renderList() {
+    const entries = state.entries || [];
+    if (view.mode === "icons") return renderIcons(entries);
     const box = $("#fm-list");
     if (!box) return;
-    if (!state.entries.length) {
-      renderEmpty("这个目录是空的");
-      return;
+    if (!entries.length) { renderEmpty("这个目录是空的"); return; }
+    const groups = groupEntries(entries, view.groupBy, view.sortKey, view.sortDir);
+    state.viewOrder = [];
+    const rows = [];
+    for (const g of groups) {
+      if (g.label) {
+        const collapsed = state.collapsed.has(g.label);
+        rows.push(`<tr class="fm-group" data-group="${esc(g.label)}"><td colspan="6">
+          <span class="tw">${collapsed ? "▸" : "▾"}</span>
+          <span class="gl">${esc(g.label)}</span>
+          <span class="muted">${g.items.length} 项</span></td></tr>`);
+        if (collapsed) continue;
+      }
+      for (const e of g.items) {
+        state.viewOrder.push(e.rel);
+        rows.push(rowHtml(e));
+      }
     }
-    box.innerHTML = state.entries.map((e, i) => `
-      <tr class="fm-row" data-i="${i}" data-rel="${esc(e.rel)}" data-dir="${e.is_dir ? 1 : 0}">
+    box.innerHTML = rows.join("");
+    bindRows(box);
+    const all = $("#fm-check-all");
+    if (all) all.checked = false;
+    reflectSelection();
+    paintSortIndicators();
+  }
+
+  function rowHtml(e) {
+    return `<tr class="fm-row" data-rel="${esc(e.rel)}" data-dir="${e.is_dir ? 1 : 0}">
         <td class="fm-check"><input type="checkbox" data-rel="${esc(e.rel)}"></td>
-        <td><div class="fm-name"><span class="fi">${iconOf(e)}</span>
+        <td><div class="fm-name"><span class="fi">${fileIcon(e)}</span>
           <span class="txt">${esc(e.name)}</span></div></td>
-        <td class="muted">${e.is_dir ? "-" : fmtSize(e.size)}</td>
+        <td class="muted">${e.is_dir ? "" : fmtSize(e.size)}</td>
+        <td class="muted">${e.is_dir ? "" : typeLabel(e)}</td>
         <td class="muted">${fmtTime(e.mtime)}</td>
         <td>${e.is_dir ? "" : badge(e.parse_status)}</td>
-      </tr>`).join("");
-    $$(".fm-row", box).forEach((tr) => {
-      tr.addEventListener("click", (ev) => onRowClick(ev, Number(tr.dataset.i)));
-      tr.addEventListener("dblclick", () => activate(Number(tr.dataset.i)));
-      tr.addEventListener("contextmenu", (ev) => {
+      </tr>`;
+  }
+
+  function renderIcons(entries) {
+    const box = $("#fm-icons");
+    if (!box) return;
+    if (!entries.length) {
+      box.innerHTML = `<div class="fm-empty">这个目录是空的</div>`;
+      return;
+    }
+    const sorted = sortEntries(entries, view.sortKey, view.sortDir);
+    state.viewOrder = sorted.map((e) => e.rel);
+    box.innerHTML = sorted.map((e) => `
+      <div class="fm-icon${state.selected.has(e.rel) ? " selected" : ""}" data-rel="${esc(e.rel)}"
+           data-dir="${e.is_dir ? 1 : 0}" title="${esc(e.name)}">
+        <div class="ic">${fileIcon(e)}</div>
+        <div class="nm">${esc(e.name)}</div>
+        <div class="mt muted">${e.is_dir ? "文件夹" : fmtSize(e.size)}</div>
+      </div>`).join("");
+    bindRows(box);
+    const all = $("#fm-check-all");
+    if (all) all.checked = false;
+    reflectSelection();
+    paintSortIndicators();
+  }
+
+  function bindRows(box) {
+    $$(".fm-row, .fm-icon", box).forEach((el) => {
+      const entry = state.byRel.get(el.dataset.rel);
+      if (!entry) return;
+      el.addEventListener("click", (ev) => onRowClick(ev, entry));
+      el.addEventListener("dblclick", () => activate(entry));
+      el.addEventListener("contextmenu", (ev) => {
         ev.preventDefault();
-        const i = Number(tr.dataset.i);
-        if (!state.selected.has(state.entries[i].rel)) selectOnly(i);
-        showCtx(ev.clientX, ev.clientY, state.entries[i]);
+        if (!state.selected.has(entry.rel)) selectOnly(entry);
+        showCtx(ev.clientX, ev.clientY, entry);
+      });
+    });
+    $$(".fm-group", box).forEach((el) => {
+      el.addEventListener("click", () => {
+        const key = el.dataset.group;
+        if (state.collapsed.has(key)) state.collapsed.delete(key);
+        else state.collapsed.add(key);
+        renderList();
       });
     });
     $$("input[type=checkbox]", box).forEach((cb) => {
@@ -171,46 +402,135 @@ window.KB = window.KB || {};
         reflectSelection();
       });
     });
-    const all = $("#fm-check-all");
-    if (all) all.checked = false;
-    reflectSelection();
   }
 
-  function onRowClick(ev, i) {
-    const e = state.entries[i];
+  function onRowClick(ev, e) {
     if (!e) return;
-    if (ev.shiftKey && state.lastIndex >= 0) {
-      const [a, b] = [state.lastIndex, i].sort((x, y) => x - y);
-      if (!(ev.ctrlKey || ev.metaKey)) state.selected.clear();
-      for (let k = a; k <= b; k++) state.selected.add(state.entries[k].rel);
+    if (ev.shiftKey && state.lastRel) {
+      const order = state.viewOrder || [];
+      const a = order.indexOf(state.lastRel);
+      const b = order.indexOf(e.rel);
+      if (a >= 0 && b >= 0) {
+        const [lo, hi] = a < b ? [a, b] : [b, a];
+        if (!(ev.ctrlKey || ev.metaKey)) state.selected.clear();
+        for (let k = lo; k <= hi; k++) state.selected.add(order[k]);
+      }
     } else if (ev.ctrlKey || ev.metaKey) {
       if (state.selected.has(e.rel)) state.selected.delete(e.rel); else state.selected.add(e.rel);
     } else {
-      selectOnly(i);
+      selectOnly(e);
     }
-    state.lastIndex = i;
+    state.lastRel = e.rel;
     reflectSelection();
   }
 
-  function selectOnly(i) {
+  function selectOnly(e) {
     state.selected.clear();
-    if (state.entries[i]) state.selected.add(state.entries[i].rel);
-    state.lastIndex = i;
+    if (e) state.selected.add(e.rel);
+    state.lastRel = e ? e.rel : "";
     reflectSelection();
   }
 
   function reflectSelection() {
-    $$(".fm-row").forEach((tr) => tr.classList.toggle("selected", state.selected.has(tr.dataset.rel)));
+    $$(".fm-row, .fm-icon").forEach((el) =>
+      el.classList.toggle("selected", state.selected.has(el.dataset.rel)));
     $$(".fm-row input[type=checkbox]").forEach((cb) => { cb.checked = state.selected.has(cb.dataset.rel); });
     const all = $("#fm-check-all");
     if (all) all.checked = state.entries.length > 0 && state.selected.size === state.entries.length;
   }
 
-  function activate(i) {
-    const e = state.entries[i];
+  function activate(e) {
     if (!e) return;
     if (e.is_dir) open(state.sourceId, e.rel);
     else preview(e);
+  }
+
+  /* ------------------------------------------------------------ 视图控件（排序/分组/视图切换） */
+  function bindViewControls() {
+    const sortSel = $("#fm-sort");
+    if (sortSel && !sortSel.dataset.bound) {
+      sortSel.dataset.bound = "1";
+      sortSel.value = view.sortKey;
+      sortSel.addEventListener("change", () => {
+        view.sortKey = sortSel.value;
+        saveView();
+        renderList();
+      });
+    }
+    const dirBtn = $("#fm-sort-dir");
+    if (dirBtn && !dirBtn.dataset.bound) {
+      dirBtn.dataset.bound = "1";
+      dirBtn.addEventListener("click", () => {
+        view.sortDir = view.sortDir === "asc" ? "desc" : "asc";
+        saveView();
+        renderList();
+      });
+    }
+    const groupSel = $("#fm-group");
+    if (groupSel && !groupSel.dataset.bound) {
+      groupSel.dataset.bound = "1";
+      groupSel.value = view.groupBy;
+      groupSel.addEventListener("change", () => {
+        view.groupBy = groupSel.value;
+        state.collapsed.clear();
+        saveView();
+        renderList();
+      });
+    }
+    const ic = $("#fm-view-icons"), ls = $("#fm-view-list");
+    if (ic && !ic.dataset.bound) {
+      ic.dataset.bound = "1";
+      ic.addEventListener("click", () => setViewMode("icons"));
+    }
+    if (ls && !ls.dataset.bound) {
+      ls.dataset.bound = "1";
+      ls.addEventListener("click", () => setViewMode("list"));
+    }
+    // 表头点击排序（点一次升序、再点降序）
+    $$(".fm-table th[data-sort]").forEach((th) => {
+      if (th.dataset.bound) return;
+      th.dataset.bound = "1";
+      th.addEventListener("click", () => {
+        const key = th.dataset.sort;
+        if (view.sortKey === key) view.sortDir = view.sortDir === "asc" ? "desc" : "asc";
+        else {
+          view.sortKey = key;
+          view.sortDir = key === "size" || key === "mtime" ? "desc" : "asc";
+        }
+        saveView();
+        const sortSel = $("#fm-sort");
+        if (sortSel) sortSel.value = view.sortKey;
+        renderList();
+      });
+    });
+  }
+
+  function setViewMode(mode) {
+    view.mode = mode;
+    saveView();
+    const table = $("#fm-table-wrap"), icons = $("#fm-icons");
+    if (table) table.classList.toggle("hidden", mode !== "list");
+    if (icons) icons.classList.toggle("hidden", mode !== "icons");
+    const ic = $("#fm-view-icons"), ls = $("#fm-view-list");
+    if (ic) ic.classList.toggle("active", mode === "icons");
+    if (ls) ls.classList.toggle("active", mode === "list");
+    const groupSel = $("#fm-group");
+    if (groupSel) {
+      groupSel.disabled = mode !== "list";
+      groupSel.title = mode === "list" ? "" : "分组只在列表（详细信息）视图可用";
+    }
+    renderList();
+  }
+
+  function paintSortIndicators() {
+    const dirBtn = $("#fm-sort-dir");
+    if (dirBtn) dirBtn.textContent = view.sortDir === "asc" ? "↑ 升序" : "↓ 降序";
+    $$(".fm-table th[data-sort]").forEach((th) => {
+      const on = th.dataset.sort === view.sortKey;
+      th.classList.toggle("sorted", on);
+      const arrow = th.querySelector(".ar");
+      if (arrow) arrow.textContent = on ? (view.sortDir === "asc" ? " ▲" : " ▼") : "";
+    });
   }
 
   /* ------------------------------------------------------------ 搜索 */
@@ -572,10 +892,12 @@ window.KB = window.KB || {};
 
   /* ------------------------------------------------------------ 启动/导出 */
   function boot() {
+    loadView();
     bindSearch();
     bindUpload();
     bindKeyboard();
     bindHeader();
+    bindViewControls();
     const tr = $("#trash-refresh");
     if (tr && !tr.dataset.bound) {
       tr.dataset.bound = "1";

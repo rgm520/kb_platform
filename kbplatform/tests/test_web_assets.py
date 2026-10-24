@@ -1,4 +1,8 @@
+import json
+import shutil
 from pathlib import Path
+
+import pytest
 
 WEB = Path(__file__).resolve().parents[2] / "web"
 
@@ -29,3 +33,61 @@ def test_upload_trash_and_admin_markup():
     assert "/api/v1/fs/upload/init" in js and "/api/v1/fs/delete" in js
     adm = (WEB / "static" / "admin-sources.js").read_text(encoding="utf-8")
     assert "/api/v1/admin/sources" in adm and "/api/v1/admin/users/" in adm
+
+
+def test_view_switch_sort_and_group_controls_present():
+    """文件页要有：图标/列表视图切换、排序方式、分组下拉（Windows 资源管理器式）。"""
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    for i in ("fm-view-icons", "fm-view-list", "fm-sort", "fm-sort-dir", "fm-group"):
+        assert f'id="{i}"' in html
+    js = (WEB / "static" / "files.js").read_text(encoding="utf-8")
+    assert "sortEntries" in js, "文件页要实现排序逻辑"
+    assert "groupEntries" in js, "文件页要实现分组逻辑"
+    assert "kb.files.view" in js, "视图/排序/分组偏好要按浏览器记住"
+
+
+def test_sort_group_logic_behaviour():
+    """排序/分组是纯函数，直接跑逻辑断言行为。"""
+    import subprocess
+    import sys
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("本机没有 node，跳过前端逻辑断言")
+    js = (WEB / "static" / "files.js").read_text(encoding="utf-8")
+    # 抽出纯函数做断言（用显式标记，避免依赖文件里的函数顺序）
+    start = js.index("/* ===== VIEW_LOGIC_START ===== */")
+    end = js.index("/* ===== VIEW_LOGIC_END ===== */")
+    snippet = js[start:end]
+    script = snippet + """
+const entries = [
+  {name: "b.txt", is_dir: false, size: 10, mtime: 100, ext: ".txt"},
+  {name: "A.txt", is_dir: false, size: 300, mtime: 50, ext: ".txt"},
+  {name: "z", is_dir: true, size: 0, mtime: 999, ext: ""},
+  {name: "c.pdf", is_dir: false, size: 20, mtime: 300, ext: ".pdf"},
+];
+const byName = sortEntries(entries, "name", "asc").map(e => e.name);
+const bySize = sortEntries(entries, "size", "desc").map(e => e.name);
+const byTime = sortEntries(entries, "mtime", "desc").map(e => e.name);
+const byExt = sortEntries(entries, "ext", "asc").map(e => e.name);
+const groups = groupEntries(entries, "name", "name", "asc").map(g => g.label);
+console.log(JSON.stringify({byName, bySize, byTime, byExt, groups}));
+"""
+    out = subprocess.run([node, "-e", script], capture_output=True, text=True,
+                         encoding="utf-8", errors="replace", timeout=60)
+    assert out.returncode == 0, out.stderr
+    data = json.loads(out.stdout.strip().splitlines()[-1])
+    # 文件夹永远排最前
+    assert data["byName"][0] == "z"
+    assert data["bySize"][0] == "z"
+    assert data["byTime"][0] == "z"
+    # 名称升序
+    assert data["byName"][1:] == ["A.txt", "b.txt", "c.pdf"]
+    # 大小倒序
+    assert data["bySize"][1:] == ["A.txt", "c.pdf", "b.txt"]
+    # 修改时间倒序
+    assert data["byTime"][1:] == ["c.pdf", "b.txt", "A.txt"]
+    # 类型升序
+    assert data["byExt"][1:] == ["c.pdf", "A.txt", "b.txt"]
+    # 按名称分组：中文名按拼音首字母，英文按字母
+    assert "A" in data["groups"] and "B" in data["groups"]

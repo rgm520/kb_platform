@@ -21,7 +21,9 @@ from typing import BinaryIO, Iterator
 import smbclient
 
 SKIP_NAMES = {"_kb_trash", "#recycle", "#snapshot", "@eaDir", "$RECYCLE.BIN",
-              "System Volume Information"}
+              "System Volume Information",
+              # Windows 资源管理器默认不显示的系统文件
+              "Thumbs.db", "thumbs.db", "desktop.ini", "Desktop.ini"}
 
 _DRIVE_RE = re.compile(r"^[A-Za-z]:")
 _BAD_CHARS = set('*?"<>|:')

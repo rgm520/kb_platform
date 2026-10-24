@@ -122,22 +122,63 @@
 .crumb.last{color:var(--fg)}
 .crumb-sep{color:#485563}
 .fm-actions{display:flex;gap:8px;align-items:center}
-.fm-actions input{width:230px}
+.fm-actions input{width:200px}
+.fm-actions select{width:auto;padding:6px 8px}
+.fm-sortdir{min-width:78px;font-size:12px}
+.fm-view{display:inline-flex;border:1px solid var(--line);border-radius:7px;overflow:hidden}
+.fm-view button{border:0;border-radius:0;background:transparent;padding:6px 10px;color:var(--muted)}
+.fm-view button:hover{background:var(--panel2)}
+.fm-view button.active{background:rgba(34,211,238,.16);color:var(--tech)}
 .fm-table-wrap{overflow:auto;flex:1}
 .fm-table th,.fm-table td{padding:8px 10px}
 .fm-table th:first-child,.fm-table td:first-child{width:34px}
 .fm-check input{width:auto}
+.fm-table th[data-sort]{cursor:pointer;user-select:none;white-space:nowrap}
+.fm-table th[data-sort]:hover{color:var(--tech)}
+.fm-table th.sorted{color:var(--tech)}
+.fm-table th .ar{font-size:10px;opacity:.9}
 .fm-row{cursor:default;user-select:none}
 .fm-row.selected td{background:rgba(34,211,238,.09)}
 .fm-row:hover td{background:#1a232d}
 .fm-name{display:flex;align-items:center;gap:9px;min-width:0}
-.fm-name .fi{width:22px;text-align:center;color:var(--tech2);flex:none}
+.fm-name .fi{width:22px;display:flex;justify-content:center;flex:none}
 .fm-name .txt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .fm-empty{padding:34px;text-align:center;color:var(--muted)}
 .fm-badge{font-size:11px;padding:1px 7px;border-radius:20px;border:1px solid var(--line);color:var(--muted)}
 .fm-badge.done{color:var(--ok);border-color:#1d4423}
 .fm-badge.pending{color:var(--warn);border-color:#4a3a10}
 .fm-badge.failed{color:var(--err);border-color:#5c2222}
+
+/* 图标与文件类型图标 */
+.ico{width:20px;height:20px;display:block}
+.ico-dir{width:22px;height:22px}
+
+/* 分组标题行 */
+.fm-group td{background:#121a22;border-top:1px solid var(--line);cursor:pointer;user-select:none}
+.fm-group:hover td{background:#16202a}
+.fm-group .tw{display:inline-block;width:16px;color:var(--tech)}
+.fm-group .gl{font-weight:600;margin-right:8px}
+
+/* 图标视图 */
+.fm-icons{
+  flex:1;overflow:auto;display:grid;gap:6px;padding:12px;
+  grid-template-columns:repeat(auto-fill,minmax(112px,1fr));
+  align-content:start;
+}
+.fm-icons .fm-empty{grid-column:1/-1}
+.fm-icon{
+  display:flex;flex-direction:column;align-items:center;gap:6px;
+  padding:10px 6px;border-radius:9px;border:1px solid transparent;cursor:default;user-select:none;
+}
+.fm-icon:hover{background:var(--panel2);border-color:var(--line)}
+.fm-icon.selected{background:rgba(34,211,238,.12);border-color:rgba(34,211,238,.4)}
+.fm-icon .ic{height:46px;display:flex;align-items:center;justify-content:center}
+.fm-icon .ic .ico{width:40px;height:40px}
+.fm-icon .nm{
+  font-size:12px;text-align:center;line-height:1.35;width:100%;
+  overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;word-break:break-all;
+}
+.fm-icon .mt{font-size:11px}
 
 .fm-search-results{
   position:absolute;z-index:40;left:242px;right:calc(42% + 26px);top:58px;
