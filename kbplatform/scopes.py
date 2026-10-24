@@ -115,6 +115,33 @@ def scope_from_catalog_row(row) -> tuple[str, str]:
     return (row["share"], row["rel_path"])
 
 
+def grants_predicate(conn, user_id: int, alias: str = "c") -> tuple[str, list]:
+    """按 2.0 的目录授权（grants）生成 SQL 谓词。
+
+    文件页和文档看板用**同一套授权**：grants 命中 → 文件可见，
+    这里就让对应路径下的文档也可见（用 catalog.path 前缀匹配）。
+    """
+    rows = conn.execute(
+        "SELECT s.root, g.subpath FROM grants g JOIN storage_sources s ON s.id=g.source_id "
+        "WHERE g.user_id=?", (int(user_id),)).fetchall()
+    if not rows:
+        return "1=0", []
+    clauses: list[str] = []
+    params: list = []
+    for root, sub in rows:
+        prefix = str(root or "").rstrip("\\")
+        sub = (sub or "").strip("\\")
+        if sub:
+            prefix = prefix + "\\" + sub
+        low = prefix.lower()
+        clauses.append(
+            f"(LOWER({alias}.path) = ? OR "
+            f"LOWER({alias}.path) LIKE ? ESCAPE '\\')")
+        # 目录边界：前缀 + 一个分隔符（转义），再用 % 通配
+        params.extend([low, _like_escape(low + "\\") + "%"])
+    return "(" + " OR ".join(clauses) + ")", params
+
+
 def describe_scopes(scopes: list[Scope]) -> list[str]:
     out = []
     for s in scopes:

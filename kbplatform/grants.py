@@ -156,15 +156,43 @@ def ensure_personal_space(conn, user, source: Source, adapter) -> Grant | None:
     return Grant(source.id, sub, True)
 
 
-def migrate_user_scopes(conn, cfg) -> int:
-    """把旧的 (share, subpath) 授权一次性映射到新 grants。
+def find_source_for_share(conn, cfg, share: str) -> int | None:
+    """按共享名找对应的存储源 id（老范围 → 新授权的映射）。
 
-    只有新建存储源之后调用才有意义；没有源时不写 user_version，
-    留到下次启动再试，避免迁移永远被跳过。
+    先按存储源名字，再按 UNC 末段（\\host\\共享名），最后按配置里的共享清单。
     """
-    version = conn.execute("PRAGMA user_version").fetchone()[0]
-    if version and version >= 1:
-        return 0
+    share = (share or "").strip()
+    if not share:
+        return None
+    rows = conn.execute("SELECT id, name, root FROM storage_sources").fetchall()
+    low = share.lower()
+    for r in rows:
+        if (r["name"] or "").lower() == low:
+            return int(r["id"])
+    for r in rows:
+        parts = [p for p in str(r["root"] or "").replace("/", "\\").strip("\\").split("\\") if p]
+        if parts and parts[-1].lower() == low:
+            return int(r["id"])
+    try:
+        from kbplatform.nas import share_roots
+        for name, unc in share_roots(cfg.drive_map, cfg.share_names):
+            if (name or "").lower() != low:
+                continue
+            for r in rows:
+                if str(r["root"] or "").rstrip("\\").lower() == str(unc or "").rstrip("\\").lower():
+                    return int(r["id"])
+    except Exception:
+        pass
+    return None
+
+
+def migrate_user_scopes(conn, cfg) -> int:
+    """把旧的 (share, subpath) 授权映射到新 grants（幂等，每次启动都跑）。
+
+    2.0 里**授权只有一套**：grants。老的 user_scopes 只是历史数据，
+    启动时同步一次，普通用户在文件页就能看到和文档看板一致的范围。
+    只有当共享已经接入成存储源时才能映射（需要 source_id）。
+    """
     sources = conn.execute("SELECT id, root FROM storage_sources WHERE enabled=1").fetchall()
     if not sources:
         return 0
@@ -183,10 +211,15 @@ def migrate_user_scopes(conn, cfg) -> int:
                 grant_sub = sub
             else:
                 continue
+            exists = conn.execute(
+                "SELECT 1 FROM grants WHERE user_id=? AND source_id=? AND subpath=?",
+                (r["user_id"], s["id"], grant_sub)).fetchone()
+            if exists:
+                continue
             conn.execute(
                 "INSERT OR IGNORE INTO grants(user_id,source_id,subpath,can_write,created_at) "
                 "VALUES (?,?,?,0,?)", (r["user_id"], s["id"], grant_sub, time.time()))
             n += 1
-    conn.execute("PRAGMA user_version=1")
-    conn.commit()
+    if n:
+        conn.commit()
     return n

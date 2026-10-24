@@ -23,6 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from kbplatform import auth, models as models_mod
+from kbplatform import grants as grants_mod
 from kbplatform.config import Config, load_config
 from kbplatform.db import init_db, ThreadLocalConn, write_with_retry
 from kbplatform.fs_service import provision_sources_from_config, register_fs_routes
@@ -163,6 +164,13 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
         provision_sources_from_config(conn, cfg)
     except Exception as e:  # 自动接入失败不能挡住服务启动
         print(f"[service] 自动接入配置共享失败: {type(e).__name__}: {e}")
+    # 老授权同步到 2.0 的目录授权：文件页与文档看板用同一套权限
+    try:
+        moved = grants_mod.migrate_user_scopes(conn, cfg)
+        if moved:
+            print(f"[service] 已把 {moved} 条老范围同步为目录授权")
+    except Exception as e:
+        print(f"[service] 老授权同步失败: {type(e).__name__}: {e}")
     vs = VectorStore(cfg.vector_dir, dim=cfg.embed_dim)
     retriever = Retriever(conn, cfg.fts_path, vs, embed_model=cfg.embed_model)
     secret = os.environ.get("KB_SESSION_SECRET") or secrets.token_hex(32)
@@ -470,12 +478,22 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
         return {"total": len(results), "results": results, "stats": stats}
 
     def scope_predicate(user: dict) -> tuple[str, list]:
-        """可见范围 SQL 谓词。管理员不受范围限制（普通用户按勾选范围）。"""
-        from kbplatform.scopes import visible_predicate
+        """可见范围 SQL 谓词：管理员不受限；普通用户按 2.0 目录授权 ∪ 老范围。
+
+        两边是**同一套授权**：文件页按 grants 过滤，文档看板/检索/问答也按
+        grants 过滤（外加还没迁移的老范围），所以"能在文件页看到的文件，
+        就能在看板上看到对应文档"。
+        """
+        from kbplatform.scopes import grants_predicate, visible_predicate
         if user["role"] == "admin":
             return "1=1", []
-        scopes = load_scopes(conn, user["id"])
-        return visible_predicate(user["id"], "c", scopes)
+        legacy = visible_predicate(user["id"], "c", load_scopes(conn, user["id"]))
+        g_pred, g_params = grants_predicate(conn, user["id"], "c")
+        if legacy[0] == "1=0":
+            return g_pred, g_params
+        if g_pred == "1=0":
+            return legacy
+        return f"({legacy[0]} OR {g_pred})", list(legacy[1]) + list(g_params)
 
     # ============================================================ 图谱
     @app.get("/api/v1/graph/search")
@@ -1147,8 +1165,35 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
 
     @app.put("/api/v1/admin/users/{user_id}/scopes")
     def admin_set_scopes(user_id: int, req: ScopeReq, ctx=Depends(require_admin)):
-        auth.set_scopes(conn, user_id, [(s[0], s[1]) for s in req.scopes])
-        return {"ok": True, "scopes": describe_scopes(load_scopes(conn, user_id))}
+        """老的"共享/子目录"授权入口 —— 内部统一落到 2.0 的 grants。
+
+        文件页与文档看板共用一套授权（grants），所以这里写的范围
+        在两边同时生效。共享还没接入成存储源时，退回写老表（看板仍可见）。
+        """
+        legacy = [(s[0], s[1]) for s in req.scopes]
+        items, pending = [], []
+        for share, subpath in legacy:
+            sid = grants_mod.find_source_for_share(conn, cfg, share)
+            if sid is None:
+                pending.append((share, subpath))
+            else:
+                items.append({"source_id": sid, "subpath": subpath, "can_write": False})
+        if items:
+            # 已有 2.0 授权的保留写权限，只覆盖目录范围
+            old = {g.source_id: g for g in grants_mod.user_grants(conn, {"id": user_id, "role": "user"})}
+            for it in items:
+                if it["source_id"] in old and old[it["source_id"]].can_write:
+                    it["can_write"] = True
+            grants_mod.set_grants(conn, user_id, items)
+        conn.execute("DELETE FROM user_scopes WHERE user_id=?", (int(user_id),))
+        for share, subpath in pending:
+            conn.execute("INSERT INTO user_scopes(user_id, share, subpath) VALUES (?,?,?)",
+                         (int(user_id), share, subpath))
+        conn.commit()
+        return {"ok": True, "scopes": describe_scopes(load_scopes(conn, user_id)),
+                "grants": [{"source_id": g.source_id, "subpath": g.subpath,
+                            "can_write": g.can_write}
+                           for g in grants_mod.user_grants(conn, {"id": user_id, "role": "user"})]}
 
     @app.put("/api/v1/admin/users/{user_id}/active")
     def admin_set_active(user_id: int, req: ActiveReq, ctx=Depends(require_admin)):
