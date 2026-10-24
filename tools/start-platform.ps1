@@ -63,11 +63,14 @@ $env:KB_SESSION_SECRET = "CHANGE_ME_SESSION_SECRET"
 $env:PYTHONIOENCODING = "utf-8"
 
 Write-Host "启动知识库平台监督进程..." -ForegroundColor Cyan
-$p = Start-Process -FilePath $py `
+# 用 pythonw.exe + 隐藏窗口：服务在后台跑，不再弹黑色命令框
+$pyBase = "$env:LOCALAPPDATA\Programs\Python\Python312"
+$pyw = "$pyBase\pythonw.exe"
+if (-not (Test-Path $pyw)) { $pyw = $py }
+$p = Start-Process -FilePath $pyw `
   -ArgumentList "-m", "kbplatform.supervisor", "$root\config.toml" `
   -WorkingDirectory $root `
-  -RedirectStandardOutput "$logs\supervisor.out.log" `
-  -RedirectStandardError  "$logs\supervisor.err.log" `
+  -WindowStyle Hidden `
   -PassThru
 
 Start-Sleep -Seconds 12

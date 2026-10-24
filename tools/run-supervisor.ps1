@@ -1,23 +1,28 @@
-﻿# 监督进程包装：把 stdout/stderr 重定向进日志文件
+﻿# 拉起知识库平台监督进程（无窗口后台运行）
 #
-# 计划任务直接跑 `python -m kbplatform.supervisor` 时，输出会被丢进
-# Task Scheduler 自己的捕获区，**出问题时什么都看不到**（踩过）。
-# 这个包装把输出落到 kb\logs\supervisor.*.log。
+# 计划任务 OpenCode-KB-Platform 就跑这个脚本。
 #
-# 由 install-task.ps1 注册的计划任务调用。
+# 为什么用 pythonw.exe：
+#   pythonw.exe 没有控制台，服务启动时不会再弹出黑色命令框。
+#   监督进程自己把 stdout/stderr 写进 kb\logs\supervisor.*.log
+#   （见 kbplatform/supervisor.py 的 setup_log_files），
+#   所以不依赖 cmd 重定向，也就不需要中间那个 cmd 进程。
+#
+# 计划任务本身已经带 -WindowStyle Hidden，这里是第二道保险。
 
 $root = "D:\kb-platform"
-$py = "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe"
 $logs = "$root\kb\logs"
 New-Item -ItemType Directory -Path $logs -Force | Out-Null
+
+$pyBase = "$env:LOCALAPPDATA\Programs\Python\Python312"
+$pyw = "$pyBase\pythonw.exe"
+$py = "$pyBase\python.exe"
+if (-not (Test-Path $pyw)) { $pyw = $py }
 
 $env:PYTHONIOENCODING = "utf-8"
 $env:PYTHONUNBUFFERED = "1"
 
 Set-Location $root
 
-# 用 cmd 的重定向而不是 PowerShell 的 `>>`：
-# PowerShell 5.1 的 `>>` 会把输出转成 UTF-16LE，日志里就是乱码；
-# cmd 的 `>>` 直接透传子进程的原始字节，UTF-8 得以保留。
-& cmd /c "`"$py`" -m kbplatform.supervisor `"$root\config.toml`" 1>>`"$logs\supervisor.out.log`" 2>>`"$logs\supervisor.err.log`""
+& $pyw -m kbplatform.supervisor "$root\config.toml"
 exit $LASTEXITCODE

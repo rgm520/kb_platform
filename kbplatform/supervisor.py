@@ -61,10 +61,13 @@ class Child:
                    encoding="utf-8", buffering=1)
         err = open(os.path.join(self.log_dir, f"{self.name}.err.log"), "a",
                    encoding="utf-8", buffering=1)
+        # CREATE_NO_WINDOW：子进程不继承/不新建控制台，服务在后台静默运行
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         self.proc = subprocess.Popen(
             self.argv, cwd=self.cwd, stdout=out, stderr=err,
             env={**os.environ, "PYTHONIOENCODING": "utf-8",
-                 "PYTHONUNBUFFERED": "1"})
+                 "PYTHONUNBUFFERED": "1"},
+            creationflags=flags)
         self.started_at = time.time()
         self.fails = 0
         print(f"[supervisor] {self.name} 已启动 PID={self.proc.pid}", flush=True)
@@ -135,6 +138,40 @@ def write_heartbeat(path: str, children: list[Child]) -> None:
         pass
 
 
+def setup_log_files(log_dir: str) -> None:
+    """把 stdout/stderr 重定向到日志文件。
+
+    监督进程现在用 pythonw.exe 启动（不弹黑色控制台），而 pythonw 下
+    sys.stdout 是 None，print 会直接抛异常，所以这里自己接管输出。
+    """
+    os.makedirs(log_dir, exist_ok=True)
+    out = open(os.path.join(log_dir, "supervisor.out.log"), "a",
+               encoding="utf-8", buffering=1)
+    err = open(os.path.join(log_dir, "supervisor.err.log"), "a",
+               encoding="utf-8", buffering=1)
+    for stream in (out, err):
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+    sys.stdout = out
+    sys.stderr = err
+
+
+def python_exe() -> str:
+    """子进程用的解释器：监督进程跑在 pythonw 下时也要换成 python.exe。
+
+    uvicorn / 摄入流水线走的是真控制台语义，pythonw 缺少 stdout 句柄时
+    部分第三方库会报错，所以子进程一律用 python.exe。
+    """
+    exe = sys.executable
+    if exe.lower().endswith("pythonw.exe"):
+        alt = exe[:-len("pythonw.exe")] + "python.exe"
+        if os.path.exists(alt):
+            return alt
+    return exe
+
+
 def acquire_single_instance_lock(lock_path: str):
     """独占文件锁，保证同一时刻只有一个监督进程。
 
@@ -168,13 +205,15 @@ def main() -> int:
     root = os.path.dirname(os.path.abspath(cfg_path))
     log_dir = os.path.join(root, "kb", "logs")
     os.makedirs(log_dir, exist_ok=True)
+    # 自己接管 stdout/stderr：pythonw 启动时没有控制台，输出必须落到日志文件
+    setup_log_files(log_dir)
 
     lock = acquire_single_instance_lock(os.path.join(log_dir, "supervisor.lock"))
     if lock is None:
         print("[supervisor] 已有另一个监督进程在运行，退出。", flush=True)
         return 0
 
-    py = sys.executable
+    py = python_exe()
     # 计划任务不继承交互会话的环境变量，会话密钥统一从配置读，
     # 否则服务每次重启会话都会失效。
     if cfg.session_secret:
@@ -217,5 +256,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.stdout.reconfigure(encoding="utf-8")
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
     sys.exit(main())
