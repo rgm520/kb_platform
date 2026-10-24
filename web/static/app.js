@@ -125,27 +125,76 @@ async function loadStats() {
   try {
     const s = await api("/api/v1/documents/stats");
     const bs = s.by_status || {};
+    // 卡片 → 下方清单的过滤条件（filter: {status, tier2}）
     const cards = [
-      { l: "监控范围内文档", n: s.total, c: "" },
-      { l: "已完成解析 (Tier 1)", n: s.tier1_done, c: "ok" },
-      { l: "已进入知识图谱 (Tier 2)", n: s.tier2_done, c: "ok" },
-      { l: "待处理", n: bs.pending || 0, c: "warn" },
-      { l: "处理失败", n: bs.failed || 0, c: "err" },
-      { l: "已跳过(源文件删除)", n: bs.skipped || 0, c: "" },
-      { l: "跳过的非文档文件", n: s.non_document_files || 0, c: "" },
+      { l: "监控范围内文档", n: s.total, c: "", filter: { status: "", tier2: 0 } },
+      { l: "已完成解析 (Tier 1)", n: s.tier1_done, c: "ok", filter: { status: "done", tier2: 0 } },
+      { l: "已进入知识图谱 (Tier 2)", n: s.tier2_done, c: "ok", filter: { status: "", tier2: 1 } },
+      { l: "待处理", n: bs.pending || 0, c: "warn", filter: { status: "pending", tier2: 0 } },
+      { l: "处理失败", n: bs.failed || 0, c: "err", filter: { status: "failed", tier2: 0 } },
+      { l: "已跳过(源文件删除)", n: bs.skipped || 0, c: "", filter: { status: "skipped", tier2: 0 } },
+      { l: "跳过的非文档文件", n: s.non_document_files || 0, c: "", filter: null },
     ];
-    $("#stat-cards").innerHTML = cards.map(x =>
-      `<div class="card-stat ${x.c}"><div class="n">${x.n}</div><div class="l">${x.l}</div></div>`).join("");
+    $("#stat-cards").innerHTML = cards.map((x, i) =>
+      `<div class="card-stat ${x.c}${x.filter ? " clickable" : ""}" data-i="${i}"
+            ${x.filter ? 'title="点击查看对应清单"' : 'title="非文档文件不在文档清单中"'}>
+         <div class="n">${x.n}</div><div class="l">${x.l}</div></div>`).join("");
+    $("#stat-cards").querySelectorAll(".card-stat").forEach((el) => {
+      el.addEventListener("click", () => {
+        const card = cards[Number(el.dataset.i)];
+        if (!card.filter) {
+          toast("这些是非文档文件（图片、压缩包等），不在文档清单里");
+          return;
+        }
+        const f = card.filter;
+        const same = state.filters.status === f.status && (state.filters.tier2 || 0) === f.tier2;
+        setDocFilter(same ? { status: "", tier2: 0 } : f);
+      });
+    });
     const tabs = { all: s.total, done: bs.done || 0, pending: bs.pending || 0,
                    failed: bs.failed || 0, skipped: bs.skipped || 0 };
     for (const k in tabs) { const el = $("#tab-" + k); if (el) el.textContent = tabs[k]; }
+    markDocFilter();
   } catch (e) { toast("统计加载失败: " + e.message); }
+}
+
+/** 统一设置文档清单过滤：状态 / Tier2，并同步卡片与页签的选中态。 */
+function setDocFilter(filter) {
+  const f = filter || { status: "", tier2: 0 };
+  state.filters.status = f.status || "";
+  state.filters.tier2 = f.tier2 || 0;
+  state.docs.page = 1;
+  markDocFilter();
+  loadDocs();
+}
+function markDocFilter() {
+  const st = state.filters.status || "";
+  const t2 = state.filters.tier2 || 0;
+  // 状态页签
+  $$("#status-tabs .tab").forEach((b) => {
+    const bst = b.dataset.status || "";
+    b.classList.toggle("active", !t2 && bst === st);
+  });
+  // 统计卡片
+  const cards = $$("#stat-cards .card-stat");
+  cards.forEach((el) => {
+    const i = Number(el.dataset.i);
+    const map = [
+      { status: "", tier2: 0 }, { status: "done", tier2: 0 }, { status: "", tier2: 1 },
+      { status: "pending", tier2: 0 }, { status: "failed", tier2: 0 },
+      { status: "skipped", tier2: 0 }, null,
+    ];
+    const f = map[i];
+    const on = !!f && f.status === st && (f.tier2 || 0) === t2;
+    el.classList.toggle("active", on);
+  });
 }
 async function loadDocs() {
   const q = new URLSearchParams({
     page: state.docs.page, page_size: state.docs.size,
   });
   if (state.filters.status) q.set("status", state.filters.status);
+  if (state.filters.tier2) q.set("tier2", state.filters.tier2);
   if (state.filters.share) q.set("share", state.filters.share);
   try {
     const r = await api("/api/v1/documents?" + q.toString());
@@ -279,8 +328,9 @@ function goPage(n) {
 $("#btn-refresh").addEventListener("click", () => { loadStats(); loadDocs(); });
 $$("#status-tabs .tab").forEach(btn => btn.addEventListener("click", () => {
   state.filters.status = btn.dataset.status || "";
+  state.filters.tier2 = 0;
   state.docs.page = 1;
-  $$("#status-tabs .tab").forEach(b => b.classList.toggle("active", b === btn));
+  markDocFilter();
   loadDocs();
 }));
 $("#f-share").addEventListener("change", e => { state.filters.share = e.target.value.trim(); state.docs.page = 1; loadDocs(); });

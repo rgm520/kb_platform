@@ -46,6 +46,17 @@ def test_view_switch_sort_and_group_controls_present():
     assert "kb.files.view" in js, "视图/排序/分组偏好要按浏览器记住"
 
 
+def test_board_stat_cards_drive_the_list():
+    """看板统计卡片要能点，并联动下方清单（统一过滤状态 + 高亮同步）。"""
+    js = (WEB / "static" / "app.js").read_text(encoding="utf-8")
+    assert "setDocFilter" in js, "统计卡片点击要通过统一过滤函数"
+    assert "markDocFilter" in js, "卡片与状态页签的选中态要同步"
+    assert 'data-i="${i}"' in js, "卡片要带索引以便绑定过滤条件"
+    assert "tier2" in js, "Tier2 卡片要能单独过滤"
+    css = (WEB / "static" / "v2.css").read_text(encoding="utf-8")
+    assert ".card-stat.clickable" in css and ".card-stat.active" in css
+
+
 def test_board_context_menu_and_user_edit_ui():
     """看板右键菜单（查看/定位/下载）与用户信息编辑入口。"""
     html = (WEB / "index.html").read_text(encoding="utf-8")

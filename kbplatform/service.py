@@ -637,7 +637,8 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
     @app.get("/api/v1/documents")
     def api_documents(request: Request, status: Optional[str] = None,
                       share: Optional[str] = None, page: int = 1,
-                      page_size: int = 50, ctx=Depends(actor)):
+                      page_size: int = 50, tier2: int = 0,
+                      ctx=Depends(actor)):
         u = ctx["user"]
         page = max(1, page)
         page_size = min(max(10, page_size), 200)
@@ -649,6 +650,9 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
         if share:
             where.append("c.share LIKE ?")
             params.append(f"%{share}%")
+        if tier2:
+            # 看板统计卡片的「已进入知识图谱 (Tier 2)」联动过滤
+            where.append("c.tier2_done=1")
         sql = f"SELECT c.* FROM catalog c WHERE {' AND '.join(where)} ORDER BY c.id LIMIT ? OFFSET ?"
         rows = conn.execute(sql, params + [page_size, (page - 1) * page_size]).fetchall()
         items = []
