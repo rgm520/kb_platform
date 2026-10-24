@@ -108,6 +108,16 @@ class ActiveReq(BaseModel):
     active: bool
 
 
+class UserUpdateReq(BaseModel):
+    """管理台修改用户信息；username 不可改（登录标识，token 绑定）。"""
+    display_name: Optional[str] = None
+    role: Optional[str] = None
+    dept: Optional[str] = None
+    active: Optional[bool] = None
+    password: Optional[str] = None
+    username: Optional[str] = None      # 兼容前端传了但忽略
+
+
 class TokenReq(BaseModel):
     label: Optional[str] = None
     ttl_days: int = 90
@@ -670,6 +680,55 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
         d["knowledge_url"] = f"/api/v1/documents/{catalog_id}/knowledge"
         return d
 
+    @app.get("/api/v1/documents/{catalog_id}/file")
+    def api_document_file(catalog_id: int, ctx=Depends(actor)):
+        """文档对应的实际文件位置（看板右键菜单用）。
+
+        已经在 2.0 索引里的文档 → 给出 (source_id, rel) 与 2.0 的预览/下载地址；
+        还没进 2.0 索引的老目录 → 回退到老的 content / download 接口。
+        """
+        d = _get_catalog_row(catalog_id, ctx["user"])
+        fe = conn.execute(
+            "SELECT source_id, rel_path, name FROM fs_entries WHERE catalog_id=?",
+            (catalog_id,)).fetchone()
+        source_id, rel = None, None
+        if fe is not None:
+            source_id, rel = int(fe["source_id"]), (fe["rel_path"] or "")
+        else:
+            # 文件还没被 2.0 扫描索引到时，按路径前缀匹配已接入的存储源
+            path = str(d["path"] or "")
+            best = None
+            for s in conn.execute("SELECT id, root FROM storage_sources WHERE enabled=1"):
+                root = str(s["root"] or "").rstrip("\\")
+                if root and path.lower().startswith(root.lower() + "\\"):
+                    if best is None or len(root) > len(best[1]):
+                        best = (int(s["id"]), root)
+            if best is not None:
+                source_id, root = best
+                rel = path[len(root) + 1:]
+        if source_id is not None:
+            qs = urllib.parse.quote((rel or "").replace("\\", "/"), safe="/")
+            return {
+                "document_id": catalog_id,
+                "name": (fe["name"] if fe is not None else d["name"]),
+                "path": d["path"],
+                "in_fs": True,
+                "source_id": source_id,
+                "rel": rel,
+                "preview_url": f"/api/v1/fs/preview?source_id={source_id}&rel={qs}",
+                "download_url": f"/api/v1/fs/download?source_id={source_id}&rel={qs}",
+            }
+        return {
+            "document_id": catalog_id,
+            "name": d["name"],
+            "path": d["path"],
+            "in_fs": False,
+            "source_id": None,
+            "rel": None,
+            "preview_url": f"/api/v1/documents/{catalog_id}/content",
+            "download_url": f"/api/v1/documents/{catalog_id}/download",
+        }
+
     @app.get("/api/v1/documents/{catalog_id}/content")
     def api_document_content(catalog_id: int, ctx=Depends(actor)):
         """取文档的**完整纯文本**（所有块按顺序拼接）。
@@ -1006,6 +1065,63 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
                                req.display_name, req.dept)
         auth.set_scopes(conn, uid, [(s[0], s[1]) for s in req.scopes])
         return {"id": uid}
+
+    @app.put("/api/v1/admin/users/{user_id}")
+    def admin_update_user(user_id: int, req: "UserUpdateReq", ctx=Depends(require_admin)):
+        """修改用户信息：显示名 / 角色 / 部门 / 启用状态，可选重置密码。
+
+        用户名不可改（它是登录标识，也被 token 绑定）。
+        防呆：不能把自己降级或停用，也不能把最后一个管理员降级/停用，
+        否则没人能进管理台收拾残局。
+        """
+        row = auth.get_user_by_id(conn, user_id)
+        if row is None:
+            raise HTTPException(404, detail="用户不存在")
+        actor = ctx["id"]
+        data = req.model_dump(exclude_none=True) if hasattr(req, "model_dump") else dict(req)
+        data.pop("username", None)          # 用户名不可改
+        new_role = data.get("role", row["role"])
+        new_active = data.get("active", bool(row["active"]))
+        is_admin_now = row["role"] == "admin" and bool(row["active"])
+
+        if (row["role"] == "admin" and new_role != "admin") or \
+           (is_admin_now and new_active is False):
+            if int(row["id"]) == int(actor):
+                raise HTTPException(400, detail="不能修改自己的角色或停用自己")
+        # 变更之后必须至少还剩一个可用的管理员，否则没人能进管理台
+        if new_role != "admin" or not new_active:
+            remaining = conn.execute(
+                "SELECT COUNT(*) FROM users WHERE role='admin' AND active=1 AND id<>?",
+                (int(row["id"]),)).fetchone()[0]
+            if remaining == 0:
+                raise HTTPException(400, detail="系统里至少要保留一个可用的管理员账号")
+        if new_role not in ("admin", "user"):
+            raise HTTPException(400, detail="角色只能是 admin 或 user")
+
+        fields, values = [], []
+        if "display_name" in data:
+            fields.append("display_name=?"); values.append(data["display_name"])
+        if "role" in data:
+            fields.append("role=?"); values.append(new_role)
+        if "dept" in data:
+            fields.append("dept=?"); values.append(data["dept"])
+        if "active" in data:
+            fields.append("active=?"); values.append(1 if new_active else 0)
+        if fields:
+            values.append(int(user_id))
+            conn.execute(f"UPDATE users SET {', '.join(fields)} WHERE id=?", values)
+        pwd = data.get("password")
+        if pwd:
+            if len(str(pwd)) < 8:
+                raise HTTPException(400, detail="密码至少 8 位")
+            auth.set_password(conn, int(user_id), str(pwd))
+        conn.commit()
+        fresh = auth.get_user_by_id(conn, user_id)
+        audit(ctx["id"], None, "user_update",
+              question=f"user={fresh['username']}", ip=None)
+        return {"id": int(fresh["id"]), "username": fresh["username"],
+                "display_name": fresh["display_name"] or "", "role": fresh["role"],
+                "dept": fresh["dept"] or "", "active": bool(fresh["active"])}
 
     @app.put("/api/v1/admin/users/{user_id}/scopes")
     def admin_set_scopes(user_id: int, req: ScopeReq, ctx=Depends(require_admin)):
