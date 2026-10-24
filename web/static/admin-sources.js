@@ -4,6 +4,7 @@ window.KB = window.KB || {};
   const $ = (s, r) => (r || document).querySelector(s);
   const $$ = (s, r) => Array.from((r || document).querySelectorAll(s));
   let sources = [];
+  let candList = [];
   let tree = { sid: null, rel: "", target: null, path: [] };
 
   const esc2 = (s) => String(s === null || s === undefined ? "" : s)
@@ -17,19 +18,37 @@ window.KB = window.KB || {};
   async function render(body) {
     body = body || bodyEl();
     body.innerHTML = '<p class="muted">加载中…</p>';
+    let cands = [];
     try {
       const r = await api("/api/v1/admin/sources");
       sources = r.sources || [];
+      try {
+        const c = await api("/api/v1/admin/sources/candidates");
+        cands = c.candidates || [];
+      } catch (e) { cands = []; }
     } catch (e) {
       body.innerHTML = `<p class="err">加载失败：${esc2(e.message)}</p>`;
       return;
     }
+    const pending = cands.filter((c) => !c.added);
     body.innerHTML = `
       <div class="page-head">
         <div><h3 style="margin:0">存储接入</h3>
           <p class="muted">每个共享根独立账号密码，密码加密保存且不回显。</p></div>
         <button class="primary" onclick="KB.adminSources.newSource()">＋ 新增存储源</button>
       </div>
+      ${sources.length ? "" : `<div class="src-hint">还没有接入任何存储源：文件浏览、目录授权都要先有存储源。
+        可以直接用下面「从现有共享导入」一键接入老平台监控的共享。</div>`}
+      ${pending.length ? `
+      <div class="src-cands">
+        <div class="src-cands-head">从现有共享导入（来自平台配置）</div>
+        ${pending.map((c, i) => `<div class="src-cand">
+          <span class="nm">${esc2(c.name)}</span>
+          <span class="rt muted" title="${esc2(c.root)}">${esc2(c.root)}</span>
+          <span class="og muted">${esc2(c.origin)}</span>
+          <button class="sm" onclick="KB.adminSources.useCandidate(${i})">接入</button>
+        </div>`).join("")}
+      </div>` : ""}
       <div id="src-form-wrap"></div>
       <div class="table-wrap"><table>
         <thead><tr><th>名称</th><th>类型</th><th>根路径</th><th>密码</th><th>可写</th>
@@ -50,6 +69,7 @@ window.KB = window.KB || {};
             <button class="sm" onclick="KB.adminSources.remove(${s.id})">删除</button>
           </td></tr>`).join("") || '<tr><td colspan="8" class="muted">还没有接入存储源</td></tr>'}
         </tbody></table></div>`;
+    candList = cands;
   }
 
   /* ------------------------------------------------------------ 表单 */
@@ -181,7 +201,22 @@ window.KB = window.KB || {};
     } catch (e) { toast("加载授权失败: " + e.message); return; }
     sources = srcs.sources || [];
     const list = data.grants || [];
-    const options = (sel) => (srcs.sources || []).map((s) =>
+    if (!sources.length) {
+      // 一个存储源都没有时，说清楚为什么下拉是空的，并给出下一步
+      openModal(`<h3 style="margin:0 0 6px">目录授权</h3>
+        <div class="src-hint">还没有接入任何存储源，所以这里没有可授权的目录。
+          请先到「存储接入」把共享接进来（可以从平台配置里的共享一键导入），再回来授权目录。</div>
+        <div class="src-actions">
+          <button id="grant-goto" class="primary">去接入存储源</button>
+        </div>`);
+      $("#grant-goto").onclick = () => {
+        closeModal();
+        const tab = document.querySelector('.tabs button[data-t="sources"]');
+        if (tab) tab.click();
+      };
+      return;
+    }
+    const options = (sel) => sources.map((s) =>
       `<option value="${s.id}" ${Number(sel) === s.id ? "selected" : ""}>${esc2(s.name)} (${esc2(s.kind)})</option>`).join("");
     openModal(`<h3 style="margin:0 0 6px">目录授权</h3>
       <p class="muted">授权是可见边界；勾选可写后该目录内才能上传、删除。保存为当前快照。</p>
@@ -228,9 +263,9 @@ window.KB = window.KB || {};
         loadAdmin();
       } catch (e) { $("#grant-msg").textContent = "保存失败：" + e.message; }
     };
-    if ((srcs.sources || []).length) {
+    if (sources.length) {
       tree.target = $(".g-sub");
-      loadTree(srcs.sources[0].id, "", tree.target);
+      loadTree(sources[0].id, "", tree.target);
     }
   }
 
@@ -261,5 +296,17 @@ window.KB = window.KB || {};
 
   function newSource() { showForm(null); }
 
-  KB.adminSources = { render, newSource, edit, test, scan, remove, openGrants };
+  // 把一个候选共享预填进表单（账号密码仍由管理员填写，保存前可先"测试连接"）
+  function useCandidate(i) {
+    const c = (candList || [])[i];
+    if (!c) return;
+    showForm({
+      id: 0, name: c.name, kind: c.kind, root: c.root, username: "", domain: "",
+      writable: true, personal_root: "", enabled: true, has_password: false,
+    });
+    const form = $("#src-form-wrap");
+    if (form) form.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+
+  KB.adminSources = { render, newSource, edit, test, scan, remove, openGrants, useCandidate };
 })();
