@@ -79,26 +79,53 @@ $settings = New-ScheduledTaskSettingsSet `
   -ExecutionTimeLimit ([TimeSpan]::Zero) `
   -MultipleInstances IgnoreNew
 
+# ---------------------------------------------------------------- 注册平台任务
+# 失败必须能回退：2026-10-24 试 Service 模式时凭据被拒，脚本中途退出，
+# 结果**任务被注销、平台也被停了**，等于平台彻底没人管。绝不能重演。
+function Register-PlatformTask($mode, $cred, $user) {
+  if ($mode -eq "Service") {
+    # 开机自启 + 登录时也启动（两种情况都能兜住）
+    $triggers = @()
+    $tStart = New-ScheduledTaskTrigger -AtStartup
+    $tStart.Delay = "PT1M"          # 等网络与磁盘就绪
+    $triggers += $tStart
+    $triggers += (New-ScheduledTaskTrigger -AtLogOn -User $user)
+    $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Password -RunLevel Highest
+    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $triggers `
+      -Principal $principal -Settings $settings -User $user -Password $cred.GetNetworkCredential().Password `
+      -Description "企业知识平台：Web 服务 + 摄入流水线（后台常驻，开机自启，崩溃自动重启）" `
+      -ErrorAction Stop | Out-Null
+  } else {
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
+    $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
+    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
+      -Principal $principal -Settings $settings `
+      -Description "企业知识平台：Web 服务 + 摄入流水线（登录时启动，崩溃自动重启）" `
+      -ErrorAction Stop | Out-Null
+  }
+}
+
+try {
+  Register-PlatformTask $Mode $cred $user
+} catch {
+  Write-Host ""
+  Write-Host "计划任务注册失败: $($_.Exception.Message)" -ForegroundColor Red
+  if ($Mode -eq "Service") {
+    Write-Host "回退到「登录时启动」模式，保证平台照常有人管……" -ForegroundColor Yellow
+    try {
+      Register-PlatformTask "Interactive" $null $user
+      Start-ScheduledTask -TaskName $TaskName
+      Write-Host "已回退成功，平台按「登录时启动」运行（注销后需重新登录才恢复）。" -ForegroundColor Green
+    } catch {
+      Write-Host "回退也失败: $($_.Exception.Message)" -ForegroundColor Red
+      Write-Host "请手动执行：powershell -File $root\tools\start-platform.ps1" -ForegroundColor Yellow
+    }
+  }
+  exit 1
+}
 if ($Mode -eq "Service") {
-  # 开机自启 + 登录时也启动（两种情况都能兜住）
-  $triggers = @()
-  $tStart = New-ScheduledTaskTrigger -AtStartup
-  $tStart.Delay = "PT1M"          # 等网络与磁盘就绪
-  $triggers += $tStart
-  $triggers += (New-ScheduledTaskTrigger -AtLogOn -User $user)
-  $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Password -RunLevel Highest
-  Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $triggers `
-    -Principal $principal -Settings $settings -User $user -Password $cred.GetNetworkCredential().Password `
-    -Description "企业知识平台：Web 服务 + 摄入流水线（后台常驻，开机自启，崩溃自动重启）" `
-    -ErrorAction Stop | Out-Null
   Write-Host "已注册计划任务 $TaskName（后台常驻：开机自启 + 注销后继续运行）" -ForegroundColor Green
 } else {
-  $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
-  $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
-  Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
-    -Principal $principal -Settings $settings `
-    -Description "企业知识平台：Web 服务 + 摄入流水线（登录时启动，崩溃自动重启）" `
-    -ErrorAction Stop | Out-Null
   Write-Host "已注册计划任务 $TaskName（登录时启动）" -ForegroundColor Green
 }
 Write-Host "  失败重启: 最多 99 次，间隔 1 分钟" -ForegroundColor Green
@@ -117,15 +144,19 @@ $wSettings = New-ScheduledTaskSettingsSet `
   -MultipleInstances IgnoreNew `
   -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
 
-Unregister-ScheduledTask -TaskName $WatchName -Confirm:$false -ErrorAction SilentlyContinue
-if ($Mode -eq "Service") {
-  Register-ScheduledTask -TaskName $WatchName -Action $wAction -Trigger $wTrigger `
-    -Principal $principal -Settings $wSettings -User $user -Password $cred.GetNetworkCredential().Password `
-    -Description "企业知识平台看门狗：每分钟检查，异常则重启平台" -ErrorAction Stop | Out-Null
-} else {
-  Register-ScheduledTask -TaskName $WatchName -Action $wAction -Trigger $wTrigger `
-    -Principal $principal -Settings $wSettings `
-    -Description "企业知识平台看门狗：每分钟检查，异常则重启平台" -ErrorAction Stop | Out-Null
+try {
+  if ($Mode -eq "Service") {
+    Register-ScheduledTask -TaskName $WatchName -Action $wAction -Trigger $wTrigger `
+      -Principal $principal -Settings $wSettings -User $user -Password $cred.GetNetworkCredential().Password `
+      -Description "企业知识平台看门狗：每分钟检查，异常则重启平台" -ErrorAction Stop | Out-Null
+  } else {
+    Register-ScheduledTask -TaskName $WatchName -Action $wAction -Trigger $wTrigger `
+      -Principal $principal -Settings $wSettings `
+      -Description "企业知识平台看门狗：每分钟检查，异常则重启平台" -ErrorAction Stop | Out-Null
+  }
+} catch {
+  Write-Host "看门狗任务注册失败: $($_.Exception.Message)" -ForegroundColor Red
+  Write-Host "（平台任务已就位，看门狗缺失只会影响自动拉起能力）" -ForegroundColor Yellow
 }
 Write-Host "已注册看门狗任务 $WatchName（每 1 分钟）" -ForegroundColor Green
 

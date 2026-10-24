@@ -108,7 +108,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File D:\kb-platform\tools\restart
 
 | 模式 | 命令 | 触发 | 注销后 | NAS 可达 |
 |---|---|---|---|---|
-| `Interactive`（默认） | `install-task.ps1` | 登录时 | **会停**，等下次登录 | ✅ 盘符映射 + 交互凭据都可用 |
+| `Interactive`（默认，**当前采用**） | `install-task.ps1` | 登录时 | **会停**，等下次登录 | ✅ 盘符映射 + 交互凭据都可用 |
 | `Service` | `install-task.ps1 -Mode Service` | **开机自启** + 登录时 | **继续运行** | ✅ 需保存 Windows 账号密码 |
 
 `Service` 模式会在**本机弹窗**索要 Windows 账号密码（密码只写进任务凭据，
@@ -116,11 +116,20 @@ powershell -NoProfile -ExecutionPolicy Bypass -File D:\kb-platform\tools\restart
 
 1. 停掉正在跑的实例并重建两条任务；
 2. 用同样的凭据跑一次 NAS 探测任务，验证**后台会话确实能读共享**，
-   读不到会明确报红，并提示改用「每个共享单独填校验账号密码」。
+   读不到会明确报红，并提示改用「每个共享单独填校验账号密码」；
+3. **注册失败自动回退**到 `Interactive` 模式并把平台拉起来
+   （2026-10-24 实测：凭据被拒时如果直接退出，平台会连任务一起消失，没人管）。
 
-> ⚠️ 实测结论：Task Scheduler 的 **S4U**（不保存密码）在后台会话里**读不到 NAS**
-> （没有网络凭据，`\\192.0.2.19\...` 直接报"路径不存在"），所以后台模式必须用
-> 保存密码的 `Password` 方式，不能图省事用 S4U。
+> ⚠️ **本机为什么当前用 `Interactive`**（2026-10-24 决策）：
+> 账号 `KB-HOST\Administrator` 是**空密码**（PasswordRequired=False），
+> 而 Task Scheduler 的「保存密码」模式不接受空密码（实测：空密码报参数错误，
+> 错密码报"无法使用指定凭据登录"），所以 `Service` 模式**必须先给该 Windows
+> 账号设一个密码**。用户选择不改密码 → 保持 `Interactive`：
+> 平台登录即起、注销即停、**下次登录自动恢复**（Logon 触发器）。
+>
+> ⚠️ 另一个实测结论：Task Scheduler 的 **S4U**（不保存密码）在后台会话里
+> **读不到 NAS**（没有网络凭据，`\\192.0.2.19\...` 直接报"路径不存在"），
+> 所以后台模式不能用 S4U 糊弄过去。
 
 ### 进程模型
 
