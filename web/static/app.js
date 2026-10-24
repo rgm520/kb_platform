@@ -731,11 +731,71 @@ async function ask() {
         <div class="tags">${(c.matched_by || []).map(x => `<span class="tag">${esc(x)}</span>`).join("")}
         ${c.restricted ? '<span class="tag">涉密·原文不回传</span>' : ""}</div>
         ${c.snippet ? `<div class="sn">${esc(c.snippet)}</div>` : ""}`;
+      d.addEventListener("contextmenu", (ev) => {
+        ev.preventDefault();
+        showCiteMenu(ev, c);
+      });
       box.appendChild(d);
     });
   } catch (e) { toast("提问失败: " + e.message); }
   finally { btn.disabled = false; btn.textContent = "提问"; }
 }
+
+/* 问答引用卡片右键菜单：打开附件所在文件路径 / 查看 / 下载 / 复制路径 */
+function showCiteMenu(ev, c) {
+  const menu = $("#cite-ctx");
+  if (!menu) return;
+  menu.innerHTML = `
+    <button data-act="locate">打开附件所在文件路径</button>
+    <button data-act="view">查看文件</button>
+    <button data-act="download">下载文件</button>
+    <button data-act="copy">复制文件路径</button>`;
+  menu.classList.remove("hidden");
+  menu.style.left = Math.min(ev.clientX, window.innerWidth - 220) + "px";
+  menu.style.top = Math.min(ev.clientY, window.innerHeight - 180) + "px";
+  let info = null;
+  menu.querySelectorAll("button").forEach((b) => {
+    b.onclick = async () => {
+      const act = b.dataset.act;
+      hideCiteMenu();
+      try {
+        if (!info && c.document_id) {
+          info = await api(`/api/v1/documents/${c.document_id}/file`);
+        }
+        if (act === "locate" || act === "view") {
+          if (info && info.in_fs) {
+            location.hash = "#/files";
+            await new Promise((r) => setTimeout(r, 60));
+            await window.KB.files.openAt(info.source_id, info.rel, act === "view");
+          } else if (act === "view") {
+            openDocText({ id: c.document_id, name: c.file }, { path: c.path });
+          } else {
+            toast("这个文件还没有接入 2.0 文件页，先在「存储接入」里接入对应共享");
+          }
+        } else if (act === "download") {
+          const url = (info && info.in_fs) ? info.download_url : c.download_url;
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = c.file;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+        } else if (act === "copy") {
+          const text = c.path || "";
+          if (navigator.clipboard) navigator.clipboard.writeText(text).then(() => toast("路径已复制")).catch(() => toast(text));
+          else toast(text);
+        }
+      } catch (e) { toast("操作失败: " + e.message, 5000); }
+    };
+  });
+}
+function hideCiteMenu() {
+  const menu = $("#cite-ctx");
+  if (menu) menu.classList.add("hidden");
+}
+document.addEventListener("click", (e) => {
+  if (!e.target.closest || !e.target.closest("#cite-ctx")) hideCiteMenu();
+});
 
 /* ---------------------------------------------------------- 管理台 */
 $$(".tabs button").forEach(b => b.addEventListener("click", () => {
@@ -796,14 +856,15 @@ async function adminUsers(body) {
     </tbody></table>`;
 }
 
-/* 修改用户信息：显示名 / 角色 / 部门 / 启用状态，可选重置密码 */
+/* 修改用户信息：用户名 / 显示名 / 角色 / 部门 / 启用状态，可选重置密码 */
 window.editUser = (id) => {
   const u = (state.adminUsers || []).find((x) => x.id === id);
   if (!u) { toast("找不到该用户"); return; }
   openModal(`<h3 style="margin:0 0 10px">修改用户信息</h3>
-    <p class="muted" style="font-size:12px">用户名（登录标识）不可修改。</p>
+    <p class="muted" style="font-size:12px">用户名可以改（改完用新名字登录），用户 ID 不可修改。</p>
     <div class="src-grid">
-      <label>用户名<input value="${esc(u.username)}" disabled></label>
+      <label>用户 ID<input value="${u.id}" disabled></label>
+      <label>用户名<input id="eu-name" value="${esc(u.username)}" placeholder="登录用的账号"></label>
       <label>显示名<input id="eu-disp" value="${esc(u.display_name || "")}"></label>
       <label>部门<input id="eu-dept" value="${esc(u.dept || "")}"></label>
       <label>角色<select id="eu-role">
@@ -824,6 +885,7 @@ window.editUser = (id) => {
     const btn = $("#eu-save");
     btn.disabled = true;
     const body = {
+      username: $("#eu-name").value.trim(),
       display_name: $("#eu-disp").value.trim(),
       dept: $("#eu-dept").value.trim(),
       role: $("#eu-role").value,

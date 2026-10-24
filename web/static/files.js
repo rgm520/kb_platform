@@ -252,8 +252,17 @@ window.KB = window.KB || {};
   async function load() {
     if (!$("#p-files")) return;
     try {
-      await loadSources();
+      await ensureSources();
       if (!state.sources.length) return;
+      // 有"待定位"的目标（看板/问答跳过来的），优先处理它
+      if (pendingAt) {
+        const t = pendingAt;
+        pendingAt = null;
+        await doOpenAt(t.sourceId, t.rel, t.previewIt);
+        return;
+      }
+      // 已经打开过某个目录就别覆盖（避免把刚定位好的位置冲掉）
+      if (state.sourceId && state.entries.length) return;
       const alive = state.sources.some((s) => s.id === state.sourceId);
       if (!alive) state.sourceId = state.sources[0].id;
       await open(state.sourceId, state.rel || "");
@@ -289,9 +298,17 @@ window.KB = window.KB || {};
     }
   }
 
-  /** 从看板跳过来：打开某个文件所在的目录，可选直接预览。 */
-  async function openAt(sourceId, rel, previewIt) {
-    rel = rel || "";
+  /** 从看板/问答跳过来：打开某个文件所在的目录，可选直接预览。
+   *  可能发生在文件页刚被路由打开、还没加载完的时候，所以用 pendingAt 交接。 */
+  let pendingAt = null;
+  let sourcesPromise = null;
+
+  function ensureSources() {
+    if (!sourcesPromise) sourcesPromise = loadSources();
+    return sourcesPromise;
+  }
+
+  async function doOpenAt(sourceId, rel, previewIt) {
     const dir = parentRel(rel);
     await open(Number(sourceId), dir);
     const hit = state.entries.find((e) => e.rel === rel);
@@ -301,6 +318,17 @@ window.KB = window.KB || {};
       else toast("已定位到文件所在目录");
     } else {
       toast("目录已打开，但列表里没找到该文件（可能已被移动）");
+    }
+  }
+
+  async function openAt(sourceId, rel, previewIt) {
+    rel = rel || "";
+    pendingAt = { sourceId: Number(sourceId), rel, previewIt };
+    try { await ensureSources(); } catch (e) { /* 交给调用方报错 */ }
+    if (state.sources.length && pendingAt) {
+      const t = pendingAt;
+      pendingAt = null;
+      await doOpenAt(t.sourceId, t.rel, t.previewIt);
     }
   }
 

@@ -95,12 +95,49 @@ def test_update_unknown_user_returns_404(app):
     assert c.put("/api/v1/admin/users/99999", json={"display_name": "x"}).status_code == 404
 
 
-def test_username_is_immutable(app):
+def test_create_user_rejects_empty_or_duplicate_username(app):
+    c, _ = _login(app)
+    assert c.post("/api/v1/admin/users",
+                  json={"username": "  ", "password": "pw123456"}).status_code == 400
+    assert c.post("/api/v1/admin/users",
+                  json={"username": "a b", "password": "pw123456"}).status_code == 400
+    assert c.post("/api/v1/admin/users",
+                  json={"username": "admin", "password": "pw123456"}).status_code == 409
+
+
+def test_username_can_be_changed_but_id_cannot(app):
+    """用户名可改（登录标识），用户 ID 永远不可改。"""
     c, _ = _login(app)
     conn = app.state.conn
     create_user(conn, "wangwu", "pw123456", role="user")
     uid = conn.execute("SELECT id FROM users WHERE username='wangwu'").fetchone()[0]
-    r = c.put(f"/api/v1/admin/users/{uid}", json={"username": "hacker"})
+
+    r = c.put(f"/api/v1/admin/users/{uid}", json={"username": "wangwu_new"})
     assert r.status_code == 200, r.text
+    assert r.json()["username"] == "wangwu_new"
     row = conn.execute("SELECT username FROM users WHERE id=?", (uid,)).fetchone()
-    assert row[0] == "wangwu"
+    assert row[0] == "wangwu_new"
+    # ID 不变
+    assert conn.execute("SELECT id FROM users WHERE username='wangwu_new'").fetchone()[0] == uid
+    # 改完名仍然能用新名字登录
+    c2 = TestClient(app)
+    assert c2.post("/api/v1/auth/login",
+                    json={"username": "wangwu_new", "password": "pw123456"}).status_code == 200
+
+
+def test_username_must_be_unique_and_valid(app):
+    c, _ = _login(app)
+    conn = app.state.conn
+    create_user(conn, "zhaoliu", "pw123456", role="user")
+    uid = conn.execute("SELECT id FROM users WHERE username='zhaoliu'").fetchone()[0]
+    # 与已有用户重名 → 拒绝
+    r = c.put(f"/api/v1/admin/users/{uid}", json={"username": "admin"})
+    assert r.status_code == 409, r.text
+    # 空名 → 拒绝
+    r = c.put(f"/api/v1/admin/users/{uid}", json={"username": "   "})
+    assert r.status_code == 400, r.text
+    # 含空格 → 拒绝
+    r = c.put(f"/api/v1/admin/users/{uid}", json={"username": "a b"})
+    assert r.status_code == 400, r.text
+    # 原名不受影响
+    assert conn.execute("SELECT username FROM users WHERE id=?", (uid,)).fetchone()[0] == "zhaoliu"

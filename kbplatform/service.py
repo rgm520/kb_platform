@@ -1059,9 +1059,18 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
 
     @app.post("/api/v1/admin/users")
     def admin_create_user(req: UserReq, ctx=Depends(require_admin)):
-        if auth.get_user(conn, req.username):
-            raise HTTPException(400, detail="用户名已存在")
-        uid = auth.create_user(conn, req.username, req.password, req.role,
+        username = (req.username or "").strip()
+        if not username:
+            raise HTTPException(400, detail="用户名不能为空")
+        if len(username) > 64 or any(ch.isspace() or ord(ch) < 32 for ch in username):
+            raise HTTPException(400, detail="用户名不能包含空格或控制字符，且不超过 64 字符")
+        if auth.get_user(conn, username):
+            raise HTTPException(409, detail="用户名已存在")
+        dup = conn.execute("SELECT id FROM users WHERE lower(username)=lower(?)",
+                           (username,)).fetchone()
+        if dup is not None:
+            raise HTTPException(409, detail="用户名已存在")
+        uid = auth.create_user(conn, username, req.password, req.role,
                                req.display_name, req.dept)
         auth.set_scopes(conn, uid, [(s[0], s[1]) for s in req.scopes])
         return {"id": uid}
@@ -1079,7 +1088,6 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
             raise HTTPException(404, detail="用户不存在")
         actor = ctx["id"]
         data = req.model_dump(exclude_none=True) if hasattr(req, "model_dump") else dict(req)
-        data.pop("username", None)          # 用户名不可改
         new_role = data.get("role", row["role"])
         new_active = data.get("active", bool(row["active"]))
         is_admin_now = row["role"] == "admin" and bool(row["active"])
@@ -1099,6 +1107,20 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
             raise HTTPException(400, detail="角色只能是 admin 或 user")
 
         fields, values = [], []
+        if "username" in data:
+            # 用户名可改（登录标识），但必须唯一、合法；用户 ID 永远不可改
+            name = str(data["username"] or "").strip()
+            if not name:
+                raise HTTPException(400, detail="用户名不能为空")
+            if len(name) > 64 or any(ch.isspace() or ord(ch) < 32 for ch in name):
+                raise HTTPException(400, detail="用户名不能包含空格或控制字符，且不超过 64 字符")
+            dup = conn.execute(
+                "SELECT id FROM users WHERE lower(username)=lower(?) AND id<>?",
+                (name, int(user_id))).fetchone()
+            if dup is not None:
+                raise HTTPException(409, detail=f"用户名 {name} 已被占用")
+            if name != row["username"]:
+                fields.append("username=?"); values.append(name)
         if "display_name" in data:
             fields.append("display_name=?"); values.append(data["display_name"])
         if "role" in data:
