@@ -47,6 +47,16 @@ def _defer_ocr(conn: sqlite3.Connection, catalog_id: int, msg: str) -> IndexResu
     return IndexResult(catalog_id, [], False, msg)
 
 
+def _ocr_requested(conn, catalog_id: int) -> bool:
+    """管理员是否手动点名要重跑（允许对存量扫描件做 OCR）。"""
+    try:
+        row = conn.execute("SELECT ocr_requested FROM catalog WHERE id=?",
+                           (catalog_id,)).fetchone()
+        return bool(row and row[0])
+    except sqlite3.OperationalError:
+        return False
+
+
 def _chunks_of(conn: sqlite3.Connection, file_path: str) -> list[int]:
     return [r[0] for r in conn.execute(
         "SELECT id FROM chunks WHERE file_path=?", (file_path,)).fetchall()]
@@ -127,7 +137,8 @@ def index_file(conn: sqlite3.Connection, fts_path: str, vs, catalog_id: int,
             meta0 = {}
         if meta0.get("need_ocr"):
             # 存量不批量 OCR：单页约 136 秒，一个大扫描件能堵死整条队列。
-            if is_ocr_backlog(unc_path):
+            # 但管理员在看板点了「重新解析」→ ocr_requested=1 → 这次照做。
+            if is_ocr_backlog(unc_path) and not _ocr_requested(conn, catalog_id):
                 return _defer_ocr(conn, catalog_id,
                                   "扫描件：存量不自动 OCR（可在看板手动触发重跑）")
             ocr_txt = ocr_pdf(unc_path, tmpdir)

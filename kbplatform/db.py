@@ -436,7 +436,10 @@ def init_db(db_path: str) -> sqlite3.Connection:
                 # 避免"密钥只能显示一次 -> 丢失就必须换密钥 -> 正在用旧密钥的
                 # 智能体全部 401" 这个死循环。
                 "ALTER TABLE api_tokens ADD COLUMN token_enc TEXT",
-                "ALTER TABLE upload_sessions ADD COLUMN overwrite INTEGER DEFAULT 0"):
+                "ALTER TABLE upload_sessions ADD COLUMN overwrite INTEGER DEFAULT 0",
+                 # 管理员在看板手动触发重跑时置 1：这次允许对扫描件做 OCR
+                 # （默认"存量扫描件不自动 OCR"，见 converters.is_ocr_backlog）
+                 "ALTER TABLE catalog ADD COLUMN ocr_requested INTEGER DEFAULT 0"):
         try:
             conn.execute(ddl)
         except sqlite3.OperationalError:

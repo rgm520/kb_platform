@@ -702,9 +702,26 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
             for r in conn.execute(sql, sparams):
                 by_ext.append({"ext": r[0], "count": r[1] or 0})
         non_doc = sum(x["count"] for x in by_ext)
+        # 「已跳过」有两种来源，统计要分开：扫描件待 OCR / 源文件已删除
+        skipped_reasons = []
+        if u["role"] == "admin":
+            rows = conn.execute(
+                "SELECT CASE WHEN needs_ocr=1 THEN '扫描件待 OCR' "
+                "            WHEN status_detail LIKE '%源文件已删除%' THEN '源文件已删除' "
+                "            ELSE COALESCE(NULLIF(status_detail,''),'其它原因') END AS reason, "
+                "       COUNT(*) FROM catalog WHERE status='skipped' GROUP BY reason").fetchall()
+        else:
+            rows = conn.execute(
+                f"SELECT CASE WHEN c.needs_ocr=1 THEN '扫描件待 OCR' "
+                f"            WHEN c.status_detail LIKE '%源文件已删除%' THEN '源文件已删除' "
+                f"            ELSE COALESCE(NULLIF(c.status_detail,''),'其它原因') END AS reason, "
+                f"       COUNT(*) FROM catalog c WHERE c.status='skipped' AND {pred} GROUP BY reason",
+                params).fetchall()
+        for r in rows:
+            skipped_reasons.append({"reason": r[0], "count": r[1] or 0})
         return {"total": total, "by_status": by_status, "tier1_done": tier1,
                 "tier2_done": tier2, "non_document_files": non_doc,
-                "non_doc_by_ext": by_ext}
+                "non_doc_by_ext": by_ext, "skipped_reasons": skipped_reasons}
 
     def _get_catalog_row(catalog_id: int, user: dict):
         """按可见范围取 catalog 行，取不到一律 404（不区分不存在与不可见）。"""
@@ -800,6 +817,26 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
             "locators": [r[2] for r in rows],
             "text": text,
         }
+
+    @app.post("/api/v1/documents/{catalog_id}/reparse")
+    def api_document_reparse(catalog_id: int, ctx=Depends(actor)):
+        """手动重新解析：失败/扫描件跳过的文档在这里重跑。
+
+        扫描件默认"存量不自动 OCR"（单页约 136 秒，批量会堵死队列），
+        但管理员点名重跑时这次允许做 OCR（置 ocr_requested=1）。
+        """
+        from kbplatform.jobs import JobQueue
+        d = _get_catalog_row(catalog_id, ctx["user"])
+        if not os.path.exists(d["path"]):
+            raise HTTPException(404, detail="源文件已不存在，无法重跑")
+        conn.execute(
+            "UPDATE catalog SET status='pending', status_detail=NULL, needs_ocr=1, "
+            "ocr_requested=1, tier1_done=0, tier2_done=0, updated_at=? WHERE id=?",
+            (time.time(), catalog_id))
+        conn.commit()
+        JobQueue(conn).enqueue("index", catalog_id, force=True)
+        return {"ok": True, "queued": True, "name": d["name"],
+                "notice": "已重新排队；扫描件需要 OCR，约 136 秒/页，请稍后刷新看状态。"}
 
     @app.get("/api/v1/documents/{catalog_id}/knowledge")
     def api_document_knowledge(catalog_id: int, ctx=Depends(actor)):

@@ -133,7 +133,8 @@ async function loadStats() {
       { l: "已进入知识图谱 (Tier 2)", n: s.tier2_done, c: "ok", filter: { status: "", tier2: 1 } },
       { l: "待处理", n: bs.pending || 0, c: "warn", filter: { status: "pending", tier2: 0 } },
       { l: "处理失败", n: bs.failed || 0, c: "err", filter: { status: "failed", tier2: 0 } },
-      { l: "已跳过(源文件删除)", n: bs.skipped || 0, c: "", filter: { status: "skipped", tier2: 0 } },
+      { l: "已跳过(扫描件/源文件已删)", n: bs.skipped || 0, c: "",
+        filter: { status: "skipped", tier2: 0 } },
       { l: "跳过的非文档文件", n: s.non_document_files || 0, c: "", filter: { stats: 1 } },
     ];
     state.nonDocByExt = s.non_doc_by_ext || [];
@@ -277,7 +278,9 @@ async function loadDocs() {
         <td>${d.chunk_count || 0}</td>
         <td>${d.kp_count || 0}</td>
         <td class="muted">${d.updated_at ? new Date(d.updated_at * 1000).toLocaleString("zh-CN") : "-"}</td>
-        <td><button class="sm" onclick="showDoc(${d.id})">详情</button></td>`;
+        <td><button class="sm" onclick="showDoc(${d.id})">详情</button>
+            ${(d.status === "skipped" || d.status === "failed")
+              ? `<button class="sm" onclick="reparseDoc(${d.id})">重新解析</button>` : ""}</td>`;
       tr.addEventListener("contextmenu", (ev) => {
         ev.preventDefault();
         showDocMenu(ev, d);
@@ -411,7 +414,19 @@ async function showDoc(id) {
     openModal(`<h3>${esc(d.name)}</h3>
       <div class="kv">路径: ${esc(d.path)}</div>
       <div class="kv">状态: ${statusText(d.status)} ${d.status_detail ? "— " + esc(d.status_detail) : ""}</div>
+      ${d.status === "skipped"
+        ? `<div class="src-hint" style="margin:8px 0">「已跳过」不是文件被删了：
+             ${d.needs_ocr
+               ? "这是<b>扫描件</b>（PDF 没有文字层），平台默认不对存量扫描件自动 OCR（太慢），文件本身在 NAS 上完好，可以正常打开/下载。"
+               : "如果是源文件被删，索引与图谱产物已清理。"}
+             ${d.needs_ocr ? "<br>点「重新解析」可以手动为它跑一次 OCR。" : ""}</div>`
+        : ""}
       <div class="kv">文本块 ${d.chunk_count || 0} · 知识点 ${d.kp_count || 0} · Tier1 ${d.tier1_done ? "✓" : "—"} · Tier2 ${d.tier2_done ? "✓" : "—"}</div>
+      <div class="src-actions">
+        <button class="sm" onclick="showDoc(${id})">刷新</button>
+        ${(d.status === "skipped" || d.status === "failed")
+          ? `<button class="sm" onclick="reparseDoc(${id})">重新解析</button>` : ""}
+      </div>
       <hr style="border-color:#2a333d">
       <h4>提炼出的知识点</h4><ul>${kps || "<li class='muted'>尚未提炼</li>"}</ul>`);
   } catch (e) { toast("加载文档详情失败: " + e.message); }
@@ -1570,6 +1585,16 @@ window.copyText = async (txt) => {
     catch (e2) { toast("复制失败，请手动选中上面的文本"); }
     document.body.removeChild(ta);
   }
+};
+window.reparseDoc = async (id) => {
+  if (!confirm("重新解析这个文档？\n\n扫描件需要做 OCR，约 136 秒/页；\n"
+             + "重跑会清掉它已有的解析结果并重新生成。")) return;
+  try {
+    const r = await api(`/api/v1/documents/${id}/reparse`, { method: "POST" });
+    toast(r.notice || "已重新排队");
+    loadStats();
+    loadDocs();
+  } catch (e) { toast("重跑失败: " + e.message, 5000); }
 };
 window.filterTokensOf = (uid) => {
   state.tokenUserFilter = uid;
