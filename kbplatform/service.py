@@ -853,12 +853,15 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
         return {"presets": models_mod.PRESETS}
 
     @app.get("/api/v1/admin/api-guide")
-    def admin_api_guide(request: Request, ctx=Depends(require_admin),
+    def admin_api_guide(request: Request, ctx=Depends(require_user),
                        token_id: Optional[int] = None):
         """对外 API 调用手册（Markdown）。
 
         token_id 指定时会把该密钥的**明文**替换进示例里，方便管理员直接
-        复制给 AI 智能体；不指定则用占位符。管理台专用。
+        复制给 AI 智能体；不指定则用占位符。
+
+        **普通用户也能取**：这是给自己智能体用的客户端说明书，不含管理侧数据；
+        手册开头会附上调用者自己的可见目录，方便 AI 知道"能问到什么"。
         """
         from kbplatform import api_guide as guide_mod
         base = (cfg.public_base_url or str(request.base_url)).rstrip("/")
@@ -868,11 +871,13 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
         tok = None
         if token_id:
             row = conn.execute(
-                "SELECT token_hash FROM api_tokens WHERE id=? AND revoked=0",
+                "SELECT user_id, token_hash FROM api_tokens WHERE id=? AND revoked=0",
                 (token_id,)).fetchone()
             # 明文不可逆存储，拿不到；用前缀占位并提示
             if row:
-                tok = row[0][:12] + "...(明文仅签发时显示一次，请手动粘贴)"
+                if ctx["role"] != "admin" and int(row["user_id"]) != int(ctx["id"]):
+                    raise HTTPException(403, detail="只能使用自己的密钥")
+                tok = row["token_hash"][:12] + "...(明文仅签发时显示一次，请手动粘贴)"
         labels = []
         for m in models_mod.list_models(conn):
             st = models_mod.check_usable(m)
@@ -881,18 +886,36 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
         from kbplatform import api_guide as guide_mod
         deploy = guide_mod.build_deploy_info(
             os.path.dirname(APP_DIR).replace("\\", "/"))
+        # 调用者自己的可见目录（AI 靠它知道能问到什么）
+        scopes = list(describe_scopes(load_scopes(conn, ctx["id"])))
+        for g in grants_mod.user_grants(conn, ctx):
+            src = conn.execute("SELECT name FROM storage_sources WHERE id=?",
+                               (g.source_id,)).fetchone()
+            if src:
+                label = f"{src['name']}" + (f"\\{g.subpath}" if g.subpath else "")
+                if label not in scopes:
+                    scopes.append(label)
+        scope_text = "、".join(scopes) if scopes else "（暂无授权目录，仅能访问公开接口）"
+        guide = guide_mod.build_guide(base, tok, labels, deploy)
+        guide = (f"> **你的可见目录**：{scope_text}\n"
+                 f"> （超出这个范围的文档，接口会返回空结果；"
+                 f"这是正常的权限边界，不是故障。）\n\n") + guide
         return {
             "base_url": base,
-            "guide": guide_mod.build_guide(base, tok, labels, deploy),
+            "guide": guide,
             "skill_snippet": guide_mod.build_skill_snippet(base + "/api/v1", tok),
+            "scope": scope_text,
             "note": ("「API 密钥」页点「查看密钥」可以随时取出完整密钥（约 35 位），"
                      "把它填进上面的输入框，下载的手册就带着真实密钥，客户端可直接用。"
                      "注意：列表里显示的前缀（前 12 位）不是密钥，填进去会 401。"),
         }
 
     @app.get("/api/v1/admin/skill-package")
-    def admin_skill_package(ctx=Depends(require_admin)):
-        """打包 WorkBuddy 技能包供下载（SKILL.md + scripts + references）。"""
+    def admin_skill_package(ctx=Depends(require_user)):
+        """打包 WorkBuddy 技能包供下载（SKILL.md + scripts + references）。
+
+        客户端说明书，任何登录用户都能下载（不含管理侧数据）。
+        """
         import io
         import zipfile
         src = os.path.join(os.path.dirname(APP_DIR), "workbuddy-zs-kb")

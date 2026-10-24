@@ -1326,12 +1326,16 @@ window.openApiGuide = async () => {
   openModal(`<h3>API 接入说明（给 AI 用）</h3>
     <p class="muted">这是一份写给 AI 智能体的接入说明：怎么用密钥连上平台、怎么查知识、
     怎么下载文档，每一步都有可直接照抄的调用示例。下载后整份发给 AI 即可。</p>
+    ${g.scope ? `<div class="src-hint" style="margin:10px 0">你的可见目录：<b>${esc(g.scope)}</b><br>
+        超出这个范围的文档接口会返回空结果——这是权限边界，不是故障。</div>` : ""}
     <div class="form-row" style="margin:12px 0">
       <label style="min-width:300px">把你的密钥填在这里（可选，下载时自动替换占位符）
         <input id="guide-token" type="password" placeholder="kb_xxxx，留空则保留占位符"></label>
     </div>
     <div class="form-row" style="margin:0 0 10px">
       <button class="primary" onclick="downloadGuide()">⬇ 下载完整手册 (.md)</button>
+      <button onclick="downloadSkillPackage()">⬇ 下载 WorkBuddy 技能包 (.zip)</button>
+      <button onclick="copySkillSnippet()">复制 WorkBuddy 片段</button>
       <span class="muted">${esc(g.note)}</span>
     </div>
     <details>
@@ -1339,14 +1343,36 @@ window.openApiGuide = async () => {
       <textarea id="guide-text" style="width:100%;height:420px;margin-top:8px;background:#1c232c;color:#e6edf3;border:1px solid #2a333d;border-radius:6px;padding:10px;font:12px/1.5 Consolas,monospace">${esc(g.guide)}</textarea>
     </details>`);
   const ti = $("#guide-token");
-  if (ti) ti.addEventListener("input", () => {
+  const applyToken = () => {
     const el = document.getElementById("guide-text");
     if (!el) return;
     if (!el.dataset.orig) el.dataset.orig = el.value;
-    el.value = ti.value.trim()
-      ? el.dataset.orig.split("<你的API密钥>").join(ti.value.trim())
-      : el.dataset.orig;
-  });
+    const key = (ti ? ti.value : "").trim();
+    const orig = el.dataset.orig;
+    if (!key) { el.value = orig; return; }
+    // 手册正文用 $ZB_KB_TOKEN 环境变量写法，替换不直观 →
+    // 改成在开头写明"本机密钥"，并把片段里的占位符换掉
+    const head = `> **本机 API 密钥**（已填入，直接用这个）：\n> \`${key}\`\n`
+              + `>\n> 下面的示例用 \`$ZB_KB_TOKEN\` 环境变量，把上面这串填进去即可。\n\n`;
+    el.value = head + orig.split("<你的API密钥>").join(key);
+  };
+  if (ti) ti.addEventListener("input", applyToken);
+};
+window.copySkillSnippet = async () => {
+  const g = state.apiGuide;
+  if (!g) { toast("手册还没生成", 1500); return; }
+  const key = (document.getElementById("guide-token") || {}).value || "";
+  const text = (g.skill_snippet || "").split("<你的API密钥>").join(key.trim() || "<你的API密钥>");
+  try {
+    await navigator.clipboard.writeText(text);
+    toast("已复制 WorkBuddy 片段");
+  } catch (e) {
+    const ta = document.createElement("textarea");
+    ta.value = text; document.body.appendChild(ta); ta.select();
+    try { document.execCommand("copy"); toast("已复制 WorkBuddy 片段"); }
+    catch (e2) { toast("复制失败，请手动从下方预览里选"); }
+    ta.remove();
+  }
 };
 window.downloadGuide = () => {
   const el = document.getElementById("guide-text");
@@ -1359,6 +1385,15 @@ window.downloadGuide = () => {
   a.click();
   setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
   toast("已下载 企业知识库-API接入说明.md");
+};
+window.downloadSkillPackage = () => {
+  const a = document.createElement("a");
+  a.href = "/api/v1/admin/skill-package";
+  a.download = "workbuddy-zs-kb.zip";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  toast("已下载 workbuddy-zs-kb.zip（导入 WorkBuddy 即可用）");
 };
 window.issueToken = async () => {
   const sel = $("#tk-user");
