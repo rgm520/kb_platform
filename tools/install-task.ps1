@@ -1,48 +1,74 @@
-﻿# 注册知识库平台为 Windows 计划任务（开机自启 + 失败自动重启）
+﻿# 注册知识库平台为 Windows 计划任务
 #
 # 用法：
 #   powershell -NoProfile -ExecutionPolicy Bypass -File D:\kb-platform\tools\install-task.ps1
+#   powershell -NoProfile -ExecutionPolicy Bypass -File D:\kb-platform\tools\install-task.ps1 -Mode Service
 #   powershell -NoProfile -ExecutionPolicy Bypass -File D:\kb-platform\tools\install-task.ps1 -Uninstall
+#
+# 两种运行模式：
+#   Interactive（默认）——「以登录用户身份运行」，登录时启动。
+#       盘符映射（U:/V:/W:/X:/Y:）一定可用；但**注销后平台会停**，要等下次登录。
+#   Service ——「不管用户是否登录都运行」，开机自启 + 注销后继续跑。
+#       需要 Windows 账号密码（脚本会本地弹窗索要，密码只写进任务凭据，不进命令行/日志）。
+#       实测：S4U（不存密码）在后台会话里**读不到 NAS**（无网络凭据），
+#       所以后台模式必须用 Password 方式保存凭据。
 #
 # 为什么用计划任务而不是 Start-Process：
 #   Start-Process 起的进程，父 shell 一被回收（会话结束 / 终端关闭 / 命令超时被杀）
-# 就会被连带终止，日志里没有任何异常，只是服务静默消失——这是实际踩过的坑。
+#   就会被连带终止，日志里没有任何异常，只是服务静默消失——这是实际踩过的坑。
 #   计划任务由 Task Scheduler 托管，不受交互 shell 生命周期影响，且能开机自启。
-#
-# 必须「以登录用户身份运行」：U:/V:/W:/X:/Y: 是该用户的持久盘符映射，
-# 换账户运行就看不到 NAS 了。
 
-param([switch]$Uninstall)
+param(
+  [switch]$Uninstall,
+  [ValidateSet("Interactive", "Service")]
+  [string]$Mode = "Interactive",
+  [switch]$SkipVerify
+)
 
 $TaskName = "OpenCode-KB-Platform"
+$WatchName = "OpenCode-KB-Watchdog"
 $root = "D:\kb-platform"
-$script = "$root\tools\start-platform.ps1"
+$logs = "$root\kb\logs"
 
 if ($Uninstall) {
   Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
-  Write-Host "已删除计划任务 $TaskName" -ForegroundColor Yellow
+  Unregister-ScheduledTask -TaskName $WatchName -Confirm:$false -ErrorAction SilentlyContinue
+  Write-Host "已删除计划任务 $TaskName / $WatchName" -ForegroundColor Yellow
   exit 0
 }
 
-$existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-if ($existing) {
-  Write-Host "计划任务已存在，先删除再重建" -ForegroundColor Yellow
-  Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+# ---------------------------------------------------------------- 凭据
+$cred = $null
+$user = $env:USERNAME
+if ($Mode -eq "Service") {
+  Write-Host "后台常驻模式：需要本机 Windows 账号密码（只保存在任务凭据里）。" -ForegroundColor Cyan
+  $cred = Get-Credential -UserName $user -Message "请输入运行知识库平台的 Windows 账号密码（$user）"
+  if (-not $cred) { Write-Host "未提供凭据，已放弃。" -ForegroundColor Red; exit 1 }
+  $user = $cred.UserName
 }
 
-$py = "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe"
-# 走 run-supervisor.ps1 包装：它把 stdout/stderr 重定向进日志文件。
-# 直接跑 python 的话，计划任务会把输出丢进 Task Scheduler 自己的捕获区，
-# **出问题时什么都看不到**（踩过：监督进程死在哪完全无从查起）。
+# ---------------------------------------------------------------- 停旧实例
+$existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+if ($existing) {
+  Write-Host "清理旧的计划任务与运行实例..." -ForegroundColor Yellow
+  Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+  Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+}
+Start-Sleep -Seconds 2
+Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='pythonw.exe'" |
+  Where-Object { $_.CommandLine -and
+    ($_.CommandLine.Contains("kbplatform.supervisor") -or
+     $_.CommandLine.Contains("kbplatform.service:app") -or
+     $_.CommandLine.Contains("kbplatform.pipeline")) } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+Start-Sleep -Seconds 2
+
+# ---------------------------------------------------------------- 动作
+# 走 run-supervisor.ps1 包装：它用 pythonw 启动监督进程（无黑色控制台），
+# 日志自己写进 kb\logs\supervisor.*.log。
 $action = New-ScheduledTaskAction -Execute "powershell.exe" `
   -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$root\tools\run-supervisor.ps1`"" `
   -WorkingDirectory $root
-
-# 登录时启动（需要用户会话才能拿到盘符映射）
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-
-$principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME `
-  -LogonType Interactive -RunLevel Highest
 
 $settings = New-ScheduledTaskSettingsSet `
   -AllowStartIfOnBatteries `
@@ -53,24 +79,33 @@ $settings = New-ScheduledTaskSettingsSet `
   -ExecutionTimeLimit ([TimeSpan]::Zero) `
   -MultipleInstances IgnoreNew
 
-Register-ScheduledTask -TaskName $TaskName `
-  -Action $action -Trigger $trigger -Principal $principal -Settings $settings `
-  -Description "企业知识平台：Web 服务 + 摄入流水线（监督进程托管，崩溃自动重启）" `
-  -ErrorAction Stop | Out-Null
-
-Write-Host "已注册计划任务 $TaskName" -ForegroundColor Green
-Write-Host "  动作    : $py -m kbplatform.supervisor config.toml" -ForegroundColor Green
-Write-Host "  触发器  : 登录时" -ForegroundColor Green
+if ($Mode -eq "Service") {
+  # 开机自启 + 登录时也启动（两种情况都能兜住）
+  $triggers = @()
+  $tStart = New-ScheduledTaskTrigger -AtStartup
+  $tStart.Delay = "PT1M"          # 等网络与磁盘就绪
+  $triggers += $tStart
+  $triggers += (New-ScheduledTaskTrigger -AtLogOn -User $user)
+  $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Password -RunLevel Highest
+  Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $triggers `
+    -Principal $principal -Settings $settings -User $user -Password $cred.GetNetworkCredential().Password `
+    -Description "企业知识平台：Web 服务 + 摄入流水线（后台常驻，开机自启，崩溃自动重启）" `
+    -ErrorAction Stop | Out-Null
+  Write-Host "已注册计划任务 $TaskName（后台常驻：开机自启 + 注销后继续运行）" -ForegroundColor Green
+} else {
+  $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
+  $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
+  Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
+    -Principal $principal -Settings $settings `
+    -Description "企业知识平台：Web 服务 + 摄入流水线（登录时启动，崩溃自动重启）" `
+    -ErrorAction Stop | Out-Null
+  Write-Host "已注册计划任务 $TaskName（登录时启动）" -ForegroundColor Green
+}
 Write-Host "  失败重启: 最多 99 次，间隔 1 分钟" -ForegroundColor Green
-Write-Host ""
-Write-Host "任务动作直接就是监督进程（前台常驻），因此："
-Write-Host "  * Task Scheduler 持有它，shell 退出不会被连坐杀掉"
-Write-Host "  * 监督进程再把 Web 服务与摄入流水线拉起并看护" -ForegroundColor Cyan
 
 # ---------------------------------------------------------------- 看门狗
 # Task Scheduler 的「失败后重启」对外部强杀不生效（实测 LastTaskResult=0xFFFFFFFF
 # 但任务直接转 Ready，不会重启），所以用周期看门狗兜底。
-$WatchName = "OpenCode-KB-Watchdog"
 $wAction = New-ScheduledTaskAction -Execute "powershell.exe" `
   -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$root\tools\watchdog.ps1`"" `
   -WorkingDirectory $root
@@ -83,17 +118,50 @@ $wSettings = New-ScheduledTaskSettingsSet `
   -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
 
 Unregister-ScheduledTask -TaskName $WatchName -Confirm:$false -ErrorAction SilentlyContinue
-Register-ScheduledTask -TaskName $WatchName `
-  -Action $wAction -Trigger $wTrigger -Principal $principal -Settings $wSettings `
-  -Description "企业知识平台看门狗：每分钟检查，异常则重启平台" -ErrorAction Stop | Out-Null
+if ($Mode -eq "Service") {
+  Register-ScheduledTask -TaskName $WatchName -Action $wAction -Trigger $wTrigger `
+    -Principal $principal -Settings $wSettings -User $user -Password $cred.GetNetworkCredential().Password `
+    -Description "企业知识平台看门狗：每分钟检查，异常则重启平台" -ErrorAction Stop | Out-Null
+} else {
+  Register-ScheduledTask -TaskName $WatchName -Action $wAction -Trigger $wTrigger `
+    -Principal $principal -Settings $wSettings `
+    -Description "企业知识平台看门狗：每分钟检查，异常则重启平台" -ErrorAction Stop | Out-Null
+}
 Write-Host "已注册看门狗任务 $WatchName（每 1 分钟）" -ForegroundColor Green
-Write-Host ""
 
-# 立即通过计划任务启动（关键：由 Task Scheduler 托管，不在调用者的
-# shell job object 里，因此调用者退出后服务不会被连坐杀掉）
+# ---------------------------------------------------------------- 后台可访问 NAS 验证
+if ($Mode -eq "Service" -and -not $SkipVerify) {
+  Write-Host ""
+  Write-Host "验证后台会话能否读取 NAS 共享..." -ForegroundColor Cyan
+  $probeName = "KB-SmbProbe-Test"
+  $probeAction = New-ScheduledTaskAction -Execute "powershell.exe" `
+    -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$root\tools\probe-smb.ps1`""
+  $probeTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5)
+  Unregister-ScheduledTask -TaskName $probeName -Confirm:$false -ErrorAction SilentlyContinue
+  Register-ScheduledTask -TaskName $probeName -Action $probeAction -Trigger $probeTrigger `
+    -Principal $principal -Settings $wSettings -User $user -Password $cred.GetNetworkCredential().Password `
+    -ErrorAction Stop | Out-Null
+  Start-ScheduledTask -TaskName $probeName
+  Start-Sleep -Seconds 12
+  $probeOut = "$logs\smb-probe.txt"
+  if (Test-Path $probeOut) {
+    $txt = Get-Content $probeOut -Raw
+    if ($txt -match "OK:") {
+      Write-Host "  后台会话可访问 NAS ✓" -ForegroundColor Green
+    } else {
+      Write-Host "  后台会话**读不到 NAS** ✗" -ForegroundColor Red
+      Write-Host "  多半是该 Windows 账号在 NAS 上没有权限；可以给 2.0 的每个共享单独填校验账号密码" -ForegroundColor Yellow
+      Write-Host "  （管理台 → 存储接入 → 编辑 → 账号/密码），老流水线则需要用有权限的账号。" -ForegroundColor Yellow
+    }
+  }
+  Unregister-ScheduledTask -TaskName $probeName -Confirm:$false -ErrorAction SilentlyContinue
+}
+
+# ---------------------------------------------------------------- 启动
+Write-Host ""
 Write-Host "通过计划任务启动平台..." -ForegroundColor Cyan
 Start-ScheduledTask -TaskName $TaskName
-Start-Sleep -Seconds 14
+Start-Sleep -Seconds 16
 
 $ok = $false
 try {
@@ -103,8 +171,8 @@ try {
 } catch { }
 
 if (-not $ok) {
-  Write-Host "  健康检查失败，查看 $root\kb\logs\supervisor.err.log" -ForegroundColor Red
-  Get-Content "$root\kb\logs\supervisor.err.log" -Tail 20 -ErrorAction SilentlyContinue
+  Write-Host "  健康检查失败，查看 $logs\supervisor.err.log" -ForegroundColor Red
+  Get-Content "$logs\supervisor.err.log" -Tail 20 -ErrorAction SilentlyContinue
   exit 1
 }
 
@@ -113,4 +181,4 @@ Write-Host "平台已由计划任务托管" -ForegroundColor Green
 Write-Host "  本机   : http://127.0.0.1:8000" -ForegroundColor Green
 Write-Host "  局域网 : http://192.0.2.203:8000" -ForegroundColor Green
 Write-Host "  状态   : Get-ScheduledTask -TaskName $TaskName | Get-ScheduledTaskInfo" -ForegroundColor Green
-Write-Host "  停止   : powershell -File `"$script`" -Stop" -ForegroundColor Green
+Write-Host "  日志   : $logs" -ForegroundColor Green
