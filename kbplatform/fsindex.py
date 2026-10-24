@@ -10,6 +10,7 @@ import os
 import time
 
 from kbplatform.catalog import PARSEABLE_EXT
+from kbplatform.paths import norm_unc, split_share
 from kbplatform.storage import Entry, Source, normalize_rel
 
 SKIP_DIR_NAMES = {"_kb_trash", "#recycle", "#snapshot", "@eaDir",
@@ -97,7 +98,8 @@ def scan_source(conn, source: Source, adapter, qps: int = 50) -> dict:
     seen: set[str] = set()
     failed: list[str] = []
     stats = {"files": 0, "dirs": 0, "added": 0, "updated": 0, "removed": 0,
-             "removed_rels": [], "changed_parseable": [], "errors": []}
+             "removed_rels": [], "changed_parseable": [], "errors": [],
+             "non_doc_by_ext": {}}
     interval = (1.0 / qps) if qps and qps > 0 else 0.0
 
     def walk(rel: str) -> None:
@@ -118,6 +120,10 @@ def scan_source(conn, source: Source, adapter, qps: int = 50) -> dict:
                 stats["dirs"] += 1
             else:
                 stats["files"] += 1
+                if not _is_parseable(e):
+                    # 非文档文件：只计数（按扩展名分类），不建文档记录、不解析
+                    ext = (_ext(e.name) or "(none)").lower()
+                    stats["non_doc_by_ext"][ext] = stats["non_doc_by_ext"].get(ext, 0) + 1
             old = existing.get(key)
             changed = old is None
             if old is not None and not changed:
@@ -149,7 +155,23 @@ def scan_source(conn, source: Source, adapter, qps: int = 50) -> dict:
         stats["removed"] += 1
         stats["removed_rels"].append(row["rel_path"])
     conn.commit()
+    # 非文档文件的当前数量：覆盖写（不是累加），否则每扫一轮就翻一倍
+    write_non_doc_stats(conn, source, stats.get("non_doc_by_ext") or {})
     return stats
+
+
+def write_non_doc_stats(conn, source, counts: dict[str, int]) -> None:
+    """把这个存储源下"非文档文件按扩展名"的**当前**数量写进 catalog_stats。
+
+    覆盖语义：同 share 的旧行先清掉再写，所以数字是准的、不会随扫描轮次翻倍。
+    老流水线（pipeline）遇到已有 2.0 统计的共享就不再累加，避免两套口径打架。
+    """
+    share = split_share(norm_unc(source.root))[0] or source.name
+    conn.execute("DELETE FROM catalog_stats WHERE share=?", (share,))
+    for ext, n in (counts or {}).items():
+        conn.execute("INSERT OR REPLACE INTO catalog_stats(share, ext, count) VALUES(?,?,?)",
+                     (share, ext, int(n)))
+    conn.commit()
 
 
 def _scope_sql(allowed: list[tuple[int, str]] | None) -> tuple[str, list]:

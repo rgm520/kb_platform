@@ -678,8 +678,33 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
         tier1 = conn.execute(f"SELECT COUNT(*) FROM catalog c WHERE {pred} AND tier1_done=1", params).fetchone()[0]
         tier2 = conn.execute(f"SELECT COUNT(*) FROM catalog c WHERE {pred} AND tier2_done=1", params).fetchone()[0]
         non_doc = conn.execute("SELECT SUM(count) FROM catalog_stats").fetchone()[0] or 0
+        # 非文档文件按扩展名分类统计：普通用户只算自己可见共享的那些
+        shares = None
+        if u["role"] != "admin":
+            shares = set()
+            for g in grants_mod.user_grants(conn, u):
+                row = conn.execute("SELECT name FROM storage_sources WHERE id=?",
+                                   (g.source_id,)).fetchone()
+                if row:
+                    shares.add(row["name"])
+            for s in load_scopes(conn, u["id"]):
+                shares.add(s.share)
+        by_ext = []
+        if shares is not None and not shares:
+            shares = set()          # 没有任何可见共享 → 计数为 0
+        else:
+            sql = "SELECT ext, SUM(count) FROM catalog_stats"
+            sparams: list = []
+            if shares is not None:
+                sql += " WHERE share IN (%s)" % ",".join("?" * len(shares))
+                sparams = list(shares)
+            sql += " GROUP BY ext ORDER BY SUM(count) DESC"
+            for r in conn.execute(sql, sparams):
+                by_ext.append({"ext": r[0], "count": r[1] or 0})
+        non_doc = sum(x["count"] for x in by_ext)
         return {"total": total, "by_status": by_status, "tier1_done": tier1,
-                "tier2_done": tier2, "non_document_files": non_doc}
+                "tier2_done": tier2, "non_document_files": non_doc,
+                "non_doc_by_ext": by_ext}
 
     def _get_catalog_row(catalog_id: int, user: dict):
         """按可见范围取 catalog 行，取不到一律 404（不区分不存在与不可见）。"""

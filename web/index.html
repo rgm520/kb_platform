@@ -167,7 +167,7 @@
         <button class="tab" data-status="failed">失败<b id="tab-failed">0</b></button>
         <button class="tab" data-status="skipped">已跳过<b id="tab-skipped">0</b></button>
       </div>
-      <div class="toolbar">
+      <div class="toolbar" id="board-toolbar">
         <input id="f-share" placeholder="按共享筛选（模糊）">
         <select id="pg-size">
           <option value="20">20 条/页</option>
@@ -177,13 +177,14 @@
         <button id="btn-refresh">刷新</button>
         <span id="doc-total" class="muted"></span>
       </div>
-      <div class="table-wrap">
+      <div class="table-wrap" id="doc-table-wrap">
         <table id="doc-table">
           <thead><tr><th>文件</th><th>共享</th><th>类型</th><th>状态</th><th>两层进度</th><th>块</th><th>知识点</th><th>更新时间</th><th></th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
-      <div class="pager">
+      <div id="doc-stats" class="hidden"></div>
+      <div class="pager" id="doc-pager">
         <button id="pg-first">首页</button>
         <button id="pg-prev">上一页</button>
         <span id="pg-info"></span>

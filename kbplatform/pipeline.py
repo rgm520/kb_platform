@@ -81,7 +81,12 @@ class Pipeline:
                 upsert_catalog(self.conn, fr)
             if non_doc:
                 share, _ = cat.split_share(root, self.cfg.monitor_roots)
-                bump_stats(self.conn, share, non_doc)
+                # 2.0 扫描器接管统计的共享由它写"当前数量"，这里不再累加
+                # （否则两套口径叠加，数字每轮翻倍）
+                owned = self.conn.execute(
+                    "SELECT 1 FROM catalog_stats WHERE share=? LIMIT 1", (share,)).fetchone()
+                if owned is None:
+                    bump_stats(self.conn, share, non_doc)
             stats["scanned"] += len(recs)
 
         # 2) 变更检测

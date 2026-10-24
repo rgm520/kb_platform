@@ -6,6 +6,7 @@ const state = {
   user: null, role: null, page: "desktop",
   docs: { page: 1, size: 50, total: 0 },
   filters: { status: "", share: "" },
+  boardView: "docs", nonDocByExt: [],
   cy: null, models: [], adminTab: "users",
   tokenUserFilter: null, tokenLabel: "", tokenCounts: {},
 };
@@ -133,17 +134,22 @@ async function loadStats() {
       { l: "待处理", n: bs.pending || 0, c: "warn", filter: { status: "pending", tier2: 0 } },
       { l: "处理失败", n: bs.failed || 0, c: "err", filter: { status: "failed", tier2: 0 } },
       { l: "已跳过(源文件删除)", n: bs.skipped || 0, c: "", filter: { status: "skipped", tier2: 0 } },
-      { l: "跳过的非文档文件", n: s.non_document_files || 0, c: "", filter: null },
+      { l: "跳过的非文档文件", n: s.non_document_files || 0, c: "", filter: { stats: 1 } },
     ];
+    state.nonDocByExt = s.non_doc_by_ext || [];
     $("#stat-cards").innerHTML = cards.map((x, i) =>
       `<div class="card-stat ${x.c}${x.filter ? " clickable" : ""}" data-i="${i}"
-            ${x.filter ? 'title="点击查看对应清单"' : 'title="非文档文件不在文档清单中"'}>
+            ${x.filter ? 'title="点击查看对应清单"' : 'title="点击查看分类统计"'}>
          <div class="n">${x.n}</div><div class="l">${x.l}</div></div>`).join("");
     $("#stat-cards").querySelectorAll(".card-stat").forEach((el) => {
       el.addEventListener("click", () => {
         const card = cards[Number(el.dataset.i)];
-        if (!card.filter) {
-          toast("这些是非文档文件（图片、压缩包等），不在文档清单里");
+        if (!card.filter) return;
+        if (card.filter.stats) {
+          // 切换到"非文档文件分类统计"视图
+          state.boardView = state.boardView === "stats" ? "docs" : "stats";
+          markDocFilter();
+          renderBoardBody();
           return;
         }
         const f = card.filter;
@@ -164,8 +170,59 @@ function setDocFilter(filter) {
   state.filters.status = f.status || "";
   state.filters.tier2 = f.tier2 || 0;
   state.docs.page = 1;
+  state.boardView = "docs";
   markDocFilter();
+  renderBoardBody();
   loadDocs();
+}
+/** 文档清单 ↔ 非文档文件分类统计 的视图切换。 */
+function renderBoardBody() {
+  const isStats = state.boardView === "stats";
+  const wrap = $("#doc-table-wrap"), pager = $("#doc-pager"), stats = $("#doc-stats");
+  const tabs = $("#status-tabs"), toolbar = $("#board-toolbar");
+  if (wrap) wrap.classList.toggle("hidden", isStats);
+  if (pager) pager.classList.toggle("hidden", isStats);
+  if (tabs) tabs.classList.toggle("hidden", isStats);
+  if (toolbar) toolbar.classList.toggle("hidden", isStats);
+  if (stats) {
+    stats.classList.toggle("hidden", !isStats);
+    if (isStats) renderNonDocStats(stats);
+  }
+  markDocFilter();
+}
+function renderNonDocStats(box) {
+  const rows = state.nonDocByExt || [];
+  const total = rows.reduce((a, b) => a + (b.count || 0), 0);
+  if (!rows.length) {
+    box.innerHTML = `<div class="fm-empty">没有统计到非文档文件<br>
+      <span class="muted">（扫描器完成一轮遍历后，这里会按文件类型列出数量）</span></div>`;
+    return;
+  }
+  const nameOf = (ext) => ({
+    ".png": "PNG 图片", ".jpg": "JPG 图片", ".jpeg": "JPG 图片", ".gif": "GIF 图片",
+    ".bmp": "BMP 图片", ".webp": "WebP 图片", ".svg": "SVG 矢量图",
+    ".mp4": "视频", ".mov": "视频", ".avi": "视频", ".mkv": "视频", ".wmv": "视频",
+    ".mp3": "音频", ".wav": "音频", ".m4a": "音频",
+    ".zip": "压缩包", ".rar": "压缩包", ".7z": "压缩包", ".tar": "压缩包", ".gz": "压缩包",
+    ".db": "数据库文件", ".vsdx": "Visio 流程图", ".vsd": "Visio 流程图",
+    ".emf": "图元文件", ".wmf": "图元文件", ".tmp": "临时文件", ".bak": "备份文件",
+    "(none)": "无扩展名",
+  }[String(ext).toLowerCase()] || "其它文件");
+  box.innerHTML = `
+    <div class="page-head" style="margin:2px 0 10px">
+      <div><h3 style="margin:0">非文档文件统计</h3>
+        <p class="muted" style="margin:4px 0 0">这些文件在 NAS 上存在，但平台**不解析**它们
+        （不建文档记录、不做 OCR、不进全文/向量/图谱），所以问答检索不到。共 ${total} 个。</p></div>
+      <button onclick="state.boardView='docs'; renderBoardBody(); loadDocs();">← 返回文档清单</button>
+    </div>
+    <table><thead><tr><th>文件类型</th><th>扩展名</th><th>数量</th><th>占比</th></tr></thead><tbody>
+      ${rows.map(r => `<tr>
+        <td>${esc(nameOf(r.ext))}</td>
+        <td><code>${esc(r.ext)}</code></td>
+        <td>${r.count}</td>
+        <td class="muted">${total ? (r.count * 100 / total).toFixed(1) : "0"}%</td>
+      </tr>`).join("")}
+    </tbody></table>`;
 }
 function markDocFilter() {
   const st = state.filters.status || "";
@@ -325,12 +382,17 @@ function goPage(n) {
   state.docs.page = Math.min(Math.max(1, n), pages);
   loadDocs();
 }
-$("#btn-refresh").addEventListener("click", () => { loadStats(); loadDocs(); });
+$("#btn-refresh").addEventListener("click", () => {
+  loadStats();
+  if (state.boardView === "stats") renderBoardBody(); else loadDocs();
+});
 $$("#status-tabs .tab").forEach(btn => btn.addEventListener("click", () => {
   state.filters.status = btn.dataset.status || "";
   state.filters.tier2 = 0;
   state.docs.page = 1;
+  state.boardView = "docs";
   markDocFilter();
+  renderBoardBody();
   loadDocs();
 }));
 $("#f-share").addEventListener("change", e => { state.filters.share = e.target.value.trim(); state.docs.page = 1; loadDocs(); });
