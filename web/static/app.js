@@ -136,12 +136,15 @@ async function loadStats() {
       { l: "已跳过(扫描件/源文件已删)", n: bs.skipped || 0, c: "",
         filter: { status: "skipped", tier2: 0 } },
       { l: "跳过的非文档文件", n: s.non_document_files || 0, c: "", filter: { stats: 1 } },
+      { l: "重复文档", n: (s.duplicates || {}).group_count || 0, c: "warn",
+        filter: { dup: 1 }, sub: `${(s.duplicates || {}).file_count || 0} 份文件 · 可省 ${fmtBytes((s.duplicates || {}).wasted_bytes || 0)}` },
     ];
     state.nonDocByExt = s.non_doc_by_ext || [];
     $("#stat-cards").innerHTML = cards.map((x, i) =>
       `<div class="card-stat ${x.c}${x.filter ? " clickable" : ""}" data-i="${i}"
             ${x.filter ? 'title="点击查看对应清单"' : 'title="点击查看分类统计"'}>
-         <div class="n">${x.n}</div><div class="l">${x.l}</div></div>`).join("");
+         <div class="n">${x.n}</div><div class="l">${x.l}</div>
+         ${x.sub ? `<div class="sub muted">${x.sub}</div>` : ""}</div>`).join("");
     $("#stat-cards").querySelectorAll(".card-stat").forEach((el) => {
       el.addEventListener("click", () => {
         const card = cards[Number(el.dataset.i)];
@@ -151,6 +154,14 @@ async function loadStats() {
           state.boardView = state.boardView === "stats" ? "docs" : "stats";
           markDocFilter();
           renderBoardBody();
+          return;
+        }
+        if (card.filter.dup) {
+          // 切换到"重复文档"视图
+          state.boardView = state.boardView === "dups" ? "docs" : "dups";
+          markDocFilter();
+          renderBoardBody();
+          if (state.boardView === "dups") loadDuplicates();
           return;
         }
         const f = card.filter;
@@ -188,18 +199,119 @@ function setDocFilter(filter) {
   renderBoardBody();
   loadDocs();
 }
-/** 文档清单 ↔ 非文档文件分类统计 的视图切换。 */
+/** 重复文档视图：按 MD5 分组，组内列出每一份，可勾选要删的。 */
+async function loadDuplicates() {
+  const box = $("#doc-stats");
+  if (!box) return;
+  box.innerHTML = '<p class="muted">正在统计重复文件…</p>';
+  try {
+    const r = await api("/api/v1/documents/duplicates");
+    state.duplicates = r.groups || [];
+    state.dupSel = {};
+    renderDuplicates(box, r);
+  } catch (e) {
+    box.innerHTML = `<p class="err">重复文件统计失败：${esc(e.message)}</p>`;
+  }
+}
+function fmtBytes(n) {
+  n = Number(n || 0);
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+  if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + " MB";
+  return (n / 1024 / 1024 / 1024).toFixed(2) + " GB";
+}
+function renderDuplicates(box, r) {
+  const groups = state.duplicates || [];
+  if (!groups.length) {
+    box.innerHTML = `<div class="fm-empty">没有发现重复文件<br>
+      <span class="muted">（按 MD5 内容哈希判定；同名不同内容不算重复）</span></div>`;
+    return;
+  }
+  const head = `<div class="page-head" style="margin:2px 0 10px">
+      <div><h3 style="margin:0">重复文档（${r.group_count} 组 / ${r.file_count} 份）</h3>
+        <p class="muted" style="margin:4px 0 0">按 <b>MD5 内容哈希</b>判定（不是文件名）。
+          勾选要删的重复件，每组会保留一份；删除的文件进回收站（可恢复）。</p></div>
+      <button onclick="state.boardView='docs'; renderBoardBody(); loadDocs();">← 返回文档清单</button>
+    </div>`;
+  const body = groups.map((g, gi) => `
+    <div class="dup-group">
+      <div class="dup-head">
+        <span class="md5">MD5 ${esc(g.md5.slice(0, 12))}…</span>
+        <span class="muted">${g.count} 份 · 每份 ${fmtBytes(g.size)}</span>
+        <button class="sm" onclick="dupSelectAll(${gi}, true)">全选</button>
+        <button class="sm" onclick="dupSelectAll(${gi}, false)">全不选</button>
+        <button class="sm primary" onclick="dupResolve(${gi})">删除所选（保留一份）</button>
+      </div>
+      <table><thead><tr><th>保留这份</th><th>文件</th><th>所在目录</th><th>大小</th><th>修改时间</th><th>状态</th></tr></thead><tbody>
+        ${g.items.map((it, ii) => `
+          <tr>
+            <td><input type="radio" name="dupkeep-${gi}" ${ii === 0 ? "checked" : ""}
+                       onchange="state.dupSel[${gi}] = state.dupSel[${gi}] || {}; state.dupSel[${gi}].keep = ${it.id};"></td>
+            <td><label class="chk"><input type="checkbox" ${ii === 0 ? "" : "checked"}
+                       onchange="dupToggle(${gi}, ${it.id}, this.checked)"> ${esc(it.name)}</label></td>
+            <td class="muted">${esc(it.share)} / ${esc(it.rel_path || "")}</td>
+            <td class="muted">${fmtBytes(it.size)}</td>
+            <td class="muted">${it.mtime ? new Date(it.mtime * 1000).toLocaleString("zh-CN") : "-"}</td>
+            <td class="muted">${statusText(it.status)}</td>
+          </tr>`).join("")}
+      </tbody></table>
+    </div>`).join("");
+  box.innerHTML = head + body;
+}
+function dupToggle(gi, id, on) {
+  state.dupSel[gi] = state.dupSel[gi] || { keep: null, del: {} };
+  if (on) state.dupSel[gi].del[id] = true; else delete state.dupSel[gi].del[id];
+}
+function dupSelectAll(gi, on) {
+  const g = (state.duplicates || [])[gi];
+  if (!g) return;
+  state.dupSel[gi] = state.dupSel[gi] || { keep: null, del: {} };
+  state.dupSel[gi].del = {};
+  if (on) g.items.forEach((it, i) => { if (i > 0) state.dupSel[gi].del[it.id] = true; });
+  renderDuplicates(document.getElementById("doc-stats"), {});
+}
+window.dupResolve = async (gi) => {
+  const g = (state.duplicates || [])[gi];
+  if (!g) return;
+  const sel = state.dupSel[gi] || { del: {} };
+  const keepId = (document.querySelector(`input[name="dupkeep-${gi}"]:checked`) || {}).value;
+  const delIds = Object.keys(sel.del || {}).map(Number).filter((x) => x !== Number(keepId));
+  if (!delIds.length) { toast("请先勾选要删除的重复件（每组至少保留一份）"); return; }
+  const keep = g.items.find((x) => String(x.id) === String(keepId)) || g.items[0];
+  const delNames = g.items.filter((x) => delIds.includes(x.id)).map((x) => x.name);
+  if (!confirm(`确认删除这 ${delIds.length} 个重复文件？\n\n`
+    + `删除：${delNames.join("、")}\n保留：${keep.name}\n\n`
+    + `删除的文件会进回收站（可恢复）。`)) return;
+  let shortcut = false;
+  if (confirm("是否在【被删文件原来的位置】放一个快捷方式，指向保留的那份？\n\n"
+    + "这样别人按老路径打开时依然能打开（打开的是保留的那份）。")) shortcut = true;
+  try {
+    const r = await api("/api/v1/documents/duplicates/resolve", { method: "POST",
+      body: { keep_id: Number(keep.id), delete_ids: delIds, make_shortcut: shortcut } });
+    const n = (r.deleted || []).length;
+    const sk = (r.skipped || []).length;
+    toast(`已删除 ${n} 个重复文件${sk ? `，${sk} 个被跳过` : ""}`
+      + `${shortcut ? "，原位置已放快捷方式" : ""}`, 6000);
+    loadStats();
+    loadDuplicates();
+  } catch (e) { toast("处理失败: " + e.message, 5000); }
+};
+
+/** 文档清单 ↔ 非文档统计 / 重复文档 的视图切换。 */
 function renderBoardBody() {
   const isStats = state.boardView === "stats";
+  const isDups = state.boardView === "dups";
+  const alt = isStats || isDups;
   const wrap = $("#doc-table-wrap"), pager = $("#doc-pager"), stats = $("#doc-stats");
   const tabs = $("#status-tabs"), toolbar = $("#board-toolbar");
-  if (wrap) wrap.classList.toggle("hidden", isStats);
-  if (pager) pager.classList.toggle("hidden", isStats);
-  if (tabs) tabs.classList.toggle("hidden", isStats);
-  if (toolbar) toolbar.classList.toggle("hidden", isStats);
+  if (wrap) wrap.classList.toggle("hidden", alt);
+  if (pager) pager.classList.toggle("hidden", alt);
+  if (tabs) tabs.classList.toggle("hidden", alt);
+  if (toolbar) toolbar.classList.toggle("hidden", alt);
   if (stats) {
-    stats.classList.toggle("hidden", !isStats);
+    stats.classList.toggle("hidden", !alt);
     if (isStats) renderNonDocStats(stats);
+    if (isDups) loadDuplicates();
   }
   markDocFilter();
 }
@@ -252,10 +364,15 @@ function markDocFilter() {
     const map = [
       { status: "", tier2: 0 }, { status: "done", tier2: 0 }, { status: "", tier2: 1 },
       { status: "pending", tier2: 0 }, { status: "failed", tier2: 0 },
-      { status: "skipped", tier2: 0 }, null,
+      { status: "skipped", tier2: 0 }, { stats: 1 }, { dup: 1 },
     ];
     const f = map[i];
-    const on = !!f && f.status === st && (f.tier2 || 0) === t2;
+    let on = false;
+    if (f) {
+      if (f.stats) on = state.boardView === "stats";
+      else if (f.dup) on = state.boardView === "dups";
+      else on = state.boardView === "docs" && f.status === st && (f.tier2 || 0) === t2;
+    }
     el.classList.toggle("active", on);
   });
 }

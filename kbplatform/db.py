@@ -439,7 +439,10 @@ def init_db(db_path: str) -> sqlite3.Connection:
                 "ALTER TABLE upload_sessions ADD COLUMN overwrite INTEGER DEFAULT 0",
                  # 管理员在看板手动触发重跑时置 1：这次允许对扫描件做 OCR
                  # （默认"存量扫描件不自动 OCR"，见 converters.is_ocr_backlog）
-                 "ALTER TABLE catalog ADD COLUMN ocr_requested INTEGER DEFAULT 0"):
+                 "ALTER TABLE catalog ADD COLUMN ocr_requested INTEGER DEFAULT 0",
+                 # 重复文件识别用的内容哈希（不按文件名判断）
+                 "ALTER TABLE catalog ADD COLUMN md5 TEXT",
+                 "ALTER TABLE catalog ADD COLUMN md5_at REAL"):
         try:
             conn.execute(ddl)
         except sqlite3.OperationalError:

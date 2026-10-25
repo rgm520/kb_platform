@@ -6,6 +6,7 @@ import time
 from kbplatform import catalog as cat
 from kbplatform import fts
 from kbplatform import indexer
+from kbplatform import hashing
 from kbplatform import extract as extract_mod
 from kbplatform import models as models_mod
 from kbplatform.config import Config
@@ -154,6 +155,14 @@ class Pipeline:
             self.queue.finish(job.id)
 
         stats["pending"] = self.queue.pending_count()
+
+        # 5.5) 补算重复文件用的 MD5（每轮少量，别抢解析资源）
+        try:
+            n = hashing.hash_pending(self.conn, limit=30)
+            if n:
+                stats["hashed"] = stats.get("hashed", 0) + n
+        except Exception as e:
+            print(f"[pipeline] 计算 MD5 失败: {type(e).__name__}: {e}", flush=True)
 
         # 6) 清理孤立节点与边，重算提及次数
         try:

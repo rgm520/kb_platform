@@ -24,6 +24,8 @@ from pydantic import BaseModel, Field
 
 from kbplatform import auth, models as models_mod
 from kbplatform import grants as grants_mod
+from kbplatform import hashing, shortcut
+from kbplatform import fs_service
 from kbplatform.config import Config, load_config
 from kbplatform.db import init_db, ThreadLocalConn, write_with_retry
 from kbplatform.fs_service import provision_sources_from_config, register_fs_routes
@@ -117,6 +119,13 @@ class UserUpdateReq(BaseModel):
     active: Optional[bool] = None
     password: Optional[str] = None
     username: Optional[str] = None      # 兼容前端传了但忽略
+
+
+class DuplicateResolveReq(BaseModel):
+    """处理一组重复文件：删掉 delete_ids，保留 keep_id 那一份。"""
+    keep_id: int
+    delete_ids: list[int] = Field(default_factory=list)
+    make_shortcut: bool = False      # 是否在被删文件原位置留 .lnk 快捷方式
 
 
 class TokenReq(BaseModel):
@@ -719,9 +728,14 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
                 params).fetchall()
         for r in rows:
             skipped_reasons.append({"reason": r[0], "count": r[1] or 0})
+        # 重复文档（按 MD5 内容哈希判定，不按文件名）
+        dup = hashing.duplicate_summary(conn, pred, params)
         return {"total": total, "by_status": by_status, "tier1_done": tier1,
                 "tier2_done": tier2, "non_document_files": non_doc,
-                "non_doc_by_ext": by_ext, "skipped_reasons": skipped_reasons}
+                "non_doc_by_ext": by_ext, "skipped_reasons": skipped_reasons,
+                "duplicates": {"group_count": dup["group_count"],
+                               "file_count": dup["file_count"],
+                               "wasted_bytes": dup["wasted_bytes"]}}
 
     def _get_catalog_row(catalog_id: int, user: dict):
         """按可见范围取 catalog 行，取不到一律 404（不区分不存在与不可见）。"""
@@ -732,6 +746,76 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
         if r is None:
             raise HTTPException(404, detail="文档不存在或不可见")
         return dict(r)
+
+    @app.get("/api/v1/documents/duplicates")
+    def api_document_duplicates(ctx=Depends(actor)):
+        """按 MD5 内容哈希找重复文档（不按文件名判断）。
+
+        只返回当前用户可见范围内的重复分组。
+        """
+        u = ctx["user"]
+        pred, params = scope_predicate(u)
+        data = hashing.duplicate_summary(conn, pred, params)
+        return data
+
+    @app.post("/api/v1/documents/duplicates/resolve")
+    def api_document_duplicates_resolve(req: "DuplicateResolveReq", ctx=Depends(actor)):
+        """处理一组重复文档：删掉选中的重复件，保留一份。
+
+        可选在**被删文件原位置**留一个 .lnk 快捷方式，指向保留的那份。
+        删除走平台回收站（可恢复）。
+        """
+        u = ctx["user"]
+        if u["role"] != "admin":
+            raise HTTPException(403, detail="只有管理员可以清理重复文件")
+        pred, params = scope_predicate(u)
+        keep_id = int(req.keep_id)
+        delete_ids = [int(x) for x in (req.delete_ids or []) if int(x) != keep_id]
+        if not delete_ids:
+            raise HTTPException(400, detail="没有选择要删除的重复文件")
+        keep = conn.execute("SELECT * FROM catalog WHERE id=?", (keep_id,)).fetchone()
+        if keep is None:
+            raise HTTPException(404, detail="要保留的文件不存在")
+        if keep["md5"] is None:
+            raise HTTPException(400, detail="该文件还没算过哈希，无法判定重复")
+        deleted, skipped = [], []
+        for did in delete_ids:
+            row = conn.execute("SELECT * FROM catalog WHERE id=?", (did,)).fetchone()
+            if row is None:
+                skipped.append({"id": did, "reason": "文件不存在"})
+                continue
+            if row["md5"] != keep["md5"]:
+                skipped.append({"id": did, "reason": "与保留文件的哈希不同"})
+                continue
+            # 找到它对应的存储源与相对路径
+            src = fs_service.source_for_path(conn, row["path"])
+            if src is None:
+                skipped.append({"id": did, "reason": "文件不在任何已接入的存储源里"})
+                continue
+            source, adapter, rel = src
+            gs = grants_mod.user_grants(conn, u)
+            if not grants_mod.can_write(u, gs, source.id, rel):
+                skipped.append({"id": did, "reason": "没有写权限"})
+                continue
+            trash_id, name, reason = fs_service.move_to_trash(
+                conn, cfg, app.state.scanner.vs, source, adapter, rel, u)
+            if trash_id is None:
+                skipped.append({"id": did, "reason": reason})
+                continue
+            # 目录行删掉（文件是有意清理的，不是"源文件消失"）
+            conn.execute("DELETE FROM catalog WHERE id=?", (did,))
+            conn.commit()
+            # 快捷方式：放在被删文件的原位置，指向保留的那份
+            link_done, link_msg = False, ""
+            if req.make_shortcut:
+                link_path = row["path"]
+                link_done, link_msg = shortcut.create_shortcut(link_path, keep["path"])
+            deleted.append({"id": did, "name": name, "trash_id": trash_id,
+                            "shortcut": link_done, "shortcut_msg": link_msg})
+        audit(u["id"], None, "duplicates_resolve",
+              question=f"md5={keep['md5'][:8]} 删除{len(deleted)}份", ip=None)
+        return {"ok": True, "deleted": deleted, "skipped": skipped,
+                "kept": {"id": keep_id, "name": keep["name"], "path": keep["path"]}}
 
     @app.get("/api/v1/documents/{catalog_id}")
     def api_document(catalog_id: int, ctx=Depends(actor)):

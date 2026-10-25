@@ -272,6 +272,68 @@ def provision_sources_from_config(conn, cfg) -> list[dict]:
     return created
 
 
+def move_to_trash(conn, cfg: Config, vs, source, adapter, rel: str, user) -> tuple[int | None, str, str]:
+    """把一个文件移进平台回收站。
+
+    返回 (trash_id 或 None, 文件名, 失败原因)。成功时 trash_id 非空。
+    重复文件清理也走这里，保证删除可恢复。
+    """
+    rel = normalize_rel(rel)
+    e = adapter.stat(rel)
+    if e is None:
+        return None, "", "文件不存在"
+    day = time.strftime("%Y%m%d")
+    base = f"_kb_trash\\{day}"
+    trash_rel = normalize_rel(f"{base}\\{uuid.uuid4().hex}_{e.name}")
+    try:
+        adapter.mkdirs(base)
+        adapter.rename(rel, trash_rel)
+    except Exception as ex:
+        return None, e.name, f"移入回收站失败: {ex}"
+    now = time.time()
+    cur = conn.execute(
+        "INSERT INTO trash_entries(source_id,original_rel,trash_rel,name,is_dir,"
+        "size,deleted_by,deleted_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        (source.id, rel, trash_rel, e.name, 1 if e.is_dir else 0,
+         0 if e.is_dir else e.size, user["id"], now,
+         now + cfg.trash_days * 86400))
+    removed = fsindex.delete_subtree(conn, source.id, rel)
+    for r in removed:
+        path = fsindex.entry_path(source, r)
+        row = conn.execute("SELECT id FROM catalog WHERE path=?", (path,)).fetchone()
+        if row:
+            indexer.remove_file(conn, cfg.fts_path, vs, int(row[0]))
+    conn.commit()
+    return int(cur.lastrowid), e.name, ""
+
+
+def source_for_path(conn, path: str):
+    """按文件路径找到它属于哪个存储源，返回 (source, adapter, rel)。
+
+    匹配规则：存储源的根是路径前缀（最长优先）。
+    """
+    p = str(path or "").replace("/", "\\").rstrip("\\")
+    best = None
+    for row in conn.execute("SELECT * FROM storage_sources WHERE enabled=1").fetchall():
+        root = str(row["root"] or "").replace("/", "\\").rstrip("\\")
+        if not root:
+            continue
+        if p.lower() == root.lower() or p.lower().startswith(root.lower() + "\\"):
+            if best is None or len(root) > len(best[1]):
+                best = (row, root)
+    if best is None:
+        return None
+    row, root = best
+    source = source_from_row(row)
+    rel = p[len(root):].strip("\\")
+    try:
+        adapter = adapter_for(source, auth.decrypt_secret(row["secret_enc"])
+                              if row["secret_enc"] else None)
+    except Exception:
+        return None
+    return source, adapter, rel
+
+
 def register_fs_routes(app, cfg: Config, conn, require_user, require_admin, audit):
     uploads_dir = os.path.join(cfg.data_dir, "uploads")
 
@@ -541,6 +603,10 @@ def register_fs_routes(app, cfg: Config, conn, require_user, require_admin, audi
             if row:
                 indexer.remove_file(conn, cfg.fts_path, app.state.scanner.vs, int(row[0]))
 
+    def _move_to_trash(source, adapter, rel: str, user) -> tuple[int | None, str, str]:
+        """把一个文件移进平台回收站（模块级函数见 move_to_trash）。"""
+        return move_to_trash(conn, cfg, app.state.scanner.vs, source, adapter, rel, user)
+
     @app.post("/api/v1/fs/delete")
     def fs_delete(payload: dict = Body(...), user=Depends(require_user)):
         try:
@@ -569,26 +635,11 @@ def register_fs_routes(app, cfg: Config, conn, require_user, require_admin, audi
             if e is None:
                 skipped.append({"rel": rel, "reason": "文件不存在"})
                 continue
-            day = time.strftime("%Y%m%d")
-            base = f"_kb_trash\\{day}"
-            trash_rel = normalize_rel(f"{base}\\{uuid.uuid4().hex}_{e.name}")
-            try:
-                adapter.mkdirs(base)
-                adapter.rename(rel, trash_rel)
-            except Exception as ex:
-                skipped.append({"rel": rel, "reason": f"移入回收站失败: {ex}"})
+            trash_id, _name, reason = _move_to_trash(source, adapter, rel, user)
+            if trash_id is None:
+                skipped.append({"rel": rel, "reason": reason})
                 continue
-            now = time.time()
-            cur = conn.execute(
-                "INSERT INTO trash_entries(source_id,original_rel,trash_rel,name,is_dir,"
-                "size,deleted_by,deleted_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?)",
-                (source.id, rel, trash_rel, e.name, 1 if e.is_dir else 0,
-                 0 if e.is_dir else e.size, user["id"], now,
-                 now + cfg.trash_days * 86400))
-            removed = fsindex.delete_subtree(conn, source.id, rel)
-            _cleanup_deleted(source, removed)
-            deleted.append(int(cur.lastrowid))
-            conn.commit()
+            deleted.append(trash_id)
         audit(user["id"], None, "delete", question=f"{source.name}:{len(deleted)}",
               hit_paths=[normalize_rel(r) for r in rels], ip=None)
         return {"deleted": deleted, "skipped": skipped}
