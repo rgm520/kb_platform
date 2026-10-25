@@ -11,12 +11,12 @@ import os
 import sqlite3
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import kb.chunker as chunker
-import kb.llm as llm
 import kb.parsers as parsers
 
+from kbplatform import embedding
 from kbplatform import fts
 from kbplatform.converters import (LEGACY_EXT, SCAN_EXT, convert_legacy,
                                    is_ocr_backlog, ocr_pdf)
@@ -30,6 +30,7 @@ class IndexResult:
     chunk_ids: list[int]
     ok: bool
     error: str | None
+    warnings: list[str] = field(default_factory=list)
 
 
 def _fail(conn: sqlite3.Connection, catalog_id: int, msg: str) -> IndexResult:
@@ -165,17 +166,21 @@ def index_file(conn: sqlite3.Connection, fts_path: str, vs, catalog_id: int,
 
         fts.upsert(fts_path, list(zip(chunk_ids, texts)))
 
-        vecs = llm.embed(texts, model=embed_model) if texts else []
-        if vecs:
-            vs.add(chunk_ids, vecs)
+        # 带超限兜底的向量化：一个超限块不再让整篇向量作废（Task 0.2）。
+        vecs, emb_warnings = embedding.embed_chunks(texts, model=embed_model)
+        kept = [(cid, v) for cid, v in zip(chunk_ids, vecs) if v is not None]
+        if kept:
+            vs.add([cid for cid, _ in kept], [v for _, v in kept])
 
+        # 部分块没向量时留下人能读懂的说明（覆盖上传 / 重跑会重写它，不会残留旧标记）
+        detail = "；".join(emb_warnings) if emb_warnings else None
         need_ocr = 1 if meta.get("need_ocr") else 0
         conn.execute(
             """UPDATE catalog SET status='done', status_detail=?, tier1_done=1,
                  chunk_count=?, needs_ocr=?, scanned=?, updated_at=? WHERE id=?""",
-            (None, len(chunk_ids), need_ocr, need_ocr, time.time(), catalog_id))
+            (detail, len(chunk_ids), need_ocr, need_ocr, time.time(), catalog_id))
         conn.commit()
-        return IndexResult(catalog_id, chunk_ids, True, None)
+        return IndexResult(catalog_id, chunk_ids, True, None, emb_warnings)
     except Exception as e:
         return _fail(conn, catalog_id, f"索引失败: {type(e).__name__}: {e}")
 
