@@ -220,10 +220,13 @@ class Retriever:
         if trace is not None:
             # 轨迹只记 id / 名次 / 分数 / 命中通道，绝不记原文或文件路径。
             # 这是"不准"可度量的原始依据：管理员从这里看这次到底召回了什么。
+            # fused 有写死的上限：默认 topk=8，50 条给了"谁把谁压下去"足够
+            # 的排查余量，又让每条轨迹的 JSON 体积有界（该表有 30 天保留期，
+            # 但不清理体积上限的话一条就能很大，DELETE 也救不回来单条大小）。
             trace["routes"] = {"keyword": list(k_ids), "vector": list(v_ids),
                                "graph": list(g_ids), "wiki": list(wiki_ids)}
             trace["fused"] = [{"chunk_id": int(c), "score": float(s),
-                               "routes": matched.get(c, [])} for c, s in scored]
+                               "routes": matched.get(c, [])} for c, s in scored[:50]]
             trace["acl_filtered"] = acl_filtered
 
         return hits, {"keyword": len(k_ids), "vector": len(v_ids),

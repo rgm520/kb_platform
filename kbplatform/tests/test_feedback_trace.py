@@ -12,12 +12,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 
 import pytest
 from fastapi.testclient import TestClient
 
 from kbplatform import models as models_mod
 from kbplatform.auth import create_user
+from kbplatform.config import Config
+from kbplatform.db import purge_expired_trace_data
+from kbplatform.pipeline import Pipeline
 from kbplatform.service import make_app
 
 
@@ -216,3 +220,110 @@ def test_admin_traces_list_and_detail(app):
     detail = d.json()["trace"]
     assert {"routes", "fused", "acl_filtered"} <= set(detail.keys())
     assert detail["acl_filtered"] is False  # 管理员不受限，没有 ACL 过滤
+
+
+# ------------------------------------------------------- 评审 fix round 1
+
+def test_trace_fused_is_bounded(app, monkeypatch):
+    """轨迹体积必须有界：fused 只存前 50 条，不能把整份 scored 塞进去。"""
+    conn = app.state.conn
+    path = "\\\\nas\\share\\doc2.md"
+    conn.execute("INSERT INTO catalog(path,share,rel_path,name,ext,status) "
+                 "VALUES(?,?,?,?,?,'done')", (path, "share", "doc2.md", "doc2.md", ".md"))
+    for i in range(80):
+        conn.execute("INSERT INTO chunks(file_path,file_id,chunk_idx,text,locator,tokens) "
+                     "VALUES(?,NULL,?,?,?,NULL)", (path, i, "正文", f"第{i + 1}节"))
+    conn.commit()
+    ids = [r[0] for r in conn.execute(
+        "SELECT id FROM chunks WHERE file_path=?", (path,)).fetchall()]
+    assert len(ids) == 80
+    monkeypatch.setattr("kbplatform.retrieval.Retriever._keyword",
+                        lambda self, q, topk: list(ids))
+    t = {}
+    app.state.retriever.retrieve("预算上限", user_id=None, topk=8, trace=t)
+    assert len(t["fused"]) == 50, \
+        f"fused 应有写死的上限（50），实际存了 {len(t['fused'])} 条，轨迹体积无界"
+
+
+def test_retention_purges_rows_older_than_30_days(app):
+    """30 天保留期（spec §3 A1）：31 天前的行被清，今天的行必须留下。"""
+    conn = app.state.conn
+    now = time.time()
+    old, new = now - 31 * 86400, now
+    for rid, t in (("req_old", old), ("req_new", new)):
+        conn.execute(
+            "INSERT INTO retrieval_traces(request_id,user_id,question_hash,"
+            "route_stats,candidates,top_ids,created_at) VALUES(?,NULL,'h','{}','{}','[]',?)",
+            (rid, t))
+        conn.execute(
+            "INSERT INTO query_feedback(request_id,user_id,rating,comment,created_at) "
+            "VALUES(?,NULL,'down',NULL,?)", (rid, t))
+    conn.commit()
+
+    n = purge_expired_trace_data(conn)
+    assert n == 2, f"应正好清掉 2 行（轨迹+反馈各 1 行旧行），实际 {n}"
+    for table in ("retrieval_traces", "query_feedback"):
+        rids = [r[0] for r in conn.execute(f"SELECT request_id FROM {table}").fetchall()]
+        assert rids == ["req_new"], f"{table} 过期行未清/未过期行被误删：{rids}"
+
+
+def test_pipeline_round_purges_expired_rows(tmp_path):
+    """清理机制必须由既有周期任务顺带执行，不能指望我们还没建的调度器。"""
+    p = Pipeline(Config(monitor_roots=[], data_dir=str(tmp_path / "data"),
+                        poll_interval_sec=1, scan_qps=1000))
+    conn = p.conn
+    old = time.time() - 31 * 86400
+    conn.execute(
+        "INSERT INTO retrieval_traces(request_id,user_id,question_hash,"
+        "route_stats,candidates,top_ids,created_at) VALUES('req_old',NULL,'h','{}','{}','[]',?)",
+        (old,))
+    conn.execute(
+        "INSERT INTO query_feedback(request_id,user_id,rating,comment,created_at) "
+        "VALUES('req_old',NULL,'down',NULL,?)", (old,))
+    conn.commit()
+
+    p.run_once()
+    for table in ("retrieval_traces", "query_feedback"):
+        assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0, \
+            f"pipeline 跑完一轮后 {table} 的过期行应被清掉"
+
+
+def test_query_piggybacks_retention(app):
+    """第二个保险：写轨迹时顺带清理——即使 pipeline 进程没跑，仅 Web 服务
+    活着（问答仍在发生）也能保住 30 天保留期承诺。"""
+    conn = app.state.conn
+    old = time.time() - 31 * 86400
+    conn.execute(
+        "INSERT INTO retrieval_traces(request_id,user_id,question_hash,"
+        "route_stats,candidates,top_ids,created_at) VALUES('req_old',NULL,'h','{}','{}','[]',?)",
+        (old,))
+    conn.commit()
+
+    c = _login(app)
+    _do_query(c)  # 写轨迹的同一个写入点顺带清了一次（每 app 实例节流为 0）
+    assert conn.execute(
+        "SELECT COUNT(*) FROM retrieval_traces WHERE created_at < ?",
+        (time.time() - 30 * 86400,)).fetchone()[0] == 0, "问答写入轨迹应顺带清掉过期行"
+
+
+def test_feedback_write_failure_returns_ok(app):
+    """约束「写库失败不能 500」：表丢失（或任何写库异常）时，用户点"没用"
+    仍必须得到 200 {"ok": true}——反馈丢失可以接受，体验断裂不可以。"""
+    c = _login(app)
+    rid = _do_query(c)["request_id"]
+    conn = app.state.conn
+    conn.execute("DROP TABLE query_feedback")
+    conn.commit()
+    r = c.post(f"/api/v1/query/{rid}/feedback",
+               json={"rating": "down", "comment": "答非所问"})
+    assert r.status_code == 200, f"反馈写入失败时不能报错给用户：{r.text}"
+    assert r.json() == {"ok": True}
+
+
+def test_trace_write_failure_does_not_break_query(app):
+    """轨迹是观测旁路：写失败绝不能把问答变成 500——宁可没有轨迹。"""
+    c = _login(app)
+    app.state.conn.execute("DROP TABLE retrieval_traces")
+    app.state.conn.commit()
+    resp = _do_query(c)
+    assert resp.get("request_id"), "轨迹写失败时问答必须正常返回"

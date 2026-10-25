@@ -27,7 +27,7 @@ from kbplatform import grants as grants_mod
 from kbplatform import hashing, shortcut
 from kbplatform import fs_service
 from kbplatform.config import Config, load_config
-from kbplatform.db import init_db, ThreadLocalConn, write_with_retry
+from kbplatform.db import init_db, ThreadLocalConn, purge_expired_trace_data, write_with_retry
 from kbplatform.fs_service import provision_sources_from_config, register_fs_routes
 from kbplatform.retrieval import Retriever
 from kbplatform.scanner import SourceScanner
@@ -325,6 +325,21 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
         if not ok:
             print(f"[audit] 数据库繁忙，丢弃一条审计记录 action={action}", flush=True)
 
+    # ------------------------------------------------- 观测数据保留期（30 天）
+    # 第二重清理保险放在写入点上（pipeline 每轮是第一重）：pipeline 进程没跑、
+    # 只有 Web 服务活着时，问答还在发生，写入点顺带清就能兜住。
+    # _trace_purge_state 是 make_app 实例内的闭包状态：每个进程各自节流，
+    # 每 10 分钟最多真清一次（清失败下轮再来）。
+    _trace_purge_state = {"t": 0.0}
+    TRACE_PURGE_MIN_INTERVAL = 600.0
+
+    def _maybe_purge_traces():
+        now_t = time.time()
+        if now_t - _trace_purge_state["t"] < TRACE_PURGE_MIN_INTERVAL:
+            return
+        _trace_purge_state["t"] = now_t
+        purge_expired_trace_data(conn)
+
     # ------------------------------------------------------------ 2.0 文件域
     app.state.scanner = SourceScanner(conn, cfg)
     register_fs_routes(app, cfg, conn, require_user, require_admin, audit)
@@ -480,6 +495,15 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
         except Exception as e:
             print(f"[trace] 轨迹写入异常 request_id={resp['request_id']}: "
                   f"{type(e).__name__}: {e}", flush=True)
+
+        # 30 天保留期（spec §3 A1）的第二重保险：写轨迹的同一个写入点顺带
+        # 清理（幂等、走 created_at 索引）。节流到每 10 分钟一次，正常轮里
+        # 只是一次空索引查询；失败只记日志，绝不影响响应。
+        try:
+            _maybe_purge_traces()
+        except Exception as e:
+            print(f"[trace] 过期轨迹清理失败（忽略）: {type(e).__name__}: {e}",
+                  flush=True)
         return resp, hits, restricted, used
 
     @app.post("/api/v1/query")
@@ -500,18 +524,32 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
         """答案反馈：用户点「没用」，这里记下来。
 
         反馈是旁路数据：写库失败也**绝不能**报错给用户——用户点了"没用"
-        却看到 500，比不记录更糟（参考 audit() 的容错风格）。
+        却看到 500，比不记录更糟（参考 audit() 的容错风格：写不进去只记
+        日志，然后就当成功返回）。
         """
         if req.rating not in FEEDBACK_RATINGS:
             raise HTTPException(400, detail="rating 必须是 up / down / wrong_cite 之一")
         comment = (req.comment or "").strip() or None
-        ok = write_with_retry(
-            conn,
-            "INSERT INTO query_feedback(request_id, user_id, rating, comment,"
-            " created_at) VALUES (?,?,?,?,?)",
-            (request_id, ctx["user"]["id"], req.rating, comment, time.time()))
-        if not ok:
-            print(f"[feedback] 数据库繁忙，丢弃一条反馈 request_id={request_id}",
+        try:
+            ok = write_with_retry(
+                conn,
+                "INSERT INTO query_feedback(request_id, user_id, rating, comment,"
+                " created_at) VALUES (?,?,?,?,?)",
+                (request_id, ctx["user"]["id"], req.rating, comment, time.time()))
+            if not ok:
+                print(f"[feedback] 数据库繁忙，丢弃一条反馈 request_id={request_id}",
+                      flush=True)
+        except Exception as e:
+            # no such table / 模式损坏等都走这里：反馈丢失可以接受，
+            # 用户点一个按钮换来 500 不可以。
+            print(f"[feedback] 反馈写入异常 request_id={request_id}: "
+                  f"{type(e).__name__}: {e}", flush=True)
+
+        # 写入点顺带清过期的观测数据（幂等、节流 10 分钟一次；失败不影响本接口）
+        try:
+            _maybe_purge_traces()
+        except Exception as e:
+            print(f"[feedback] 过期反馈清理失败（忽略）: {type(e).__name__}: {e}",
                   flush=True)
         # 就算写库失败也返回 ok：反馈丢失可以接受，用户体验断裂不可以
         return {"ok": True}

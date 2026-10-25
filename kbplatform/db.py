@@ -296,6 +296,7 @@ CREATE TABLE IF NOT EXISTS query_feedback (
   created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_feedback_request ON query_feedback(request_id);
+CREATE INDEX IF NOT EXISTS idx_feedback_created ON query_feedback(created_at);
 
 -- 检索轨迹：一次问答到底召回了什么、被哪路压下去了。
 -- 只存 chunk id / 名次 / 分数 / 命中通道；问题只存 sha256 前 16 位，
@@ -440,6 +441,37 @@ def _repair_chunk_fk(conn: sqlite3.Connection) -> bool:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_fid ON chunks(file_id)")
     conn.commit()
     return True
+
+
+# ---------------------------------------------------------------- 观测数据保留期
+
+TRACE_RETENTION_DAYS = 30     # spec §3 A1：轨迹与反馈保留 30 天
+
+
+def purge_expired_trace_data(conn: sqlite3.Connection,
+                             max_age_days: int = TRACE_RETENTION_DAYS) -> int:
+    """清掉超过保留期的检索轨迹与答案反馈，返回删除行数。
+
+    为什么必须做：spec §3 A1 明确「保留 30 天」，这两张表是旁路观测数据，
+    不清理就无限增长。清错也不伤业务正确性，所以失败只记日志、下轮再清；
+    DELETE 走 created_at 索引（两张表都建了），到期行很少时开销可忽略。
+    谁来调：pipeline.py 每轮 + service.py 写轨迹/反馈时节流顺带——双保险，
+    两个进程哪个活着都能保住保留期承诺；操作幂等，并发或重复执行无害。
+    """
+    cutoff = time.time() - max_age_days * 86400
+    deleted = 0
+    for table in ("retrieval_traces", "query_feedback"):
+        try:
+            cur = conn.execute(f"DELETE FROM {table} WHERE created_at < ?", (cutoff,))
+            deleted += cur.rowcount or 0
+            conn.commit()
+        except sqlite3.OperationalError as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            print(f"[db] 清理 {table} 过期数据失败（下轮重试）: {e}", flush=True)
+    return deleted
 
 
 def init_db(db_path: str) -> sqlite3.Connection:

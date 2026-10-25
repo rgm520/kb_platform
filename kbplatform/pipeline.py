@@ -10,7 +10,7 @@ from kbplatform import hashing
 from kbplatform import extract as extract_mod
 from kbplatform import models as models_mod
 from kbplatform.config import Config
-from kbplatform.db import init_db, upsert_catalog, bump_stats
+from kbplatform.db import init_db, purge_expired_trace_data, upsert_catalog, bump_stats
 from kbplatform.jobs import JobQueue
 from kbplatform.monitor import Monitor
 from kbplatform.paths import is_under_root
@@ -181,6 +181,17 @@ class Pipeline:
             pgraph.recount_mentions(self.conn)
         except Exception as e:
             print(f"[pipeline] 图谱清理失败: {type(e).__name__}: {e}", flush=True)
+
+        # 7) 观测数据保留期（spec §3 A1：轨迹/反馈保留 30 天）。
+        #    放在**既有**周期任务里清，不依赖任何新调度器；DELETE 走
+        #    created_at 索引，到期行少时可忽略开销。失败只记日志——
+        #    清理不应把摄入流水线的本轮判为失败。
+        try:
+            n = purge_expired_trace_data(self.conn)
+            if n:
+                stats["purged"] = n
+        except Exception as e:
+            print(f"[pipeline] 过期轨迹清理失败: {type(e).__name__}: {e}", flush=True)
         return stats
 
     # ------------------------------------------------------------ 循环
