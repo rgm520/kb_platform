@@ -76,7 +76,8 @@ def _split_embed(text: str, model: str,
 
     返回长度为 1 的列表：子片段全部成功时是 [合并向量]（子片段向量取均值，
     还原成一整块一个向量），否则 [None]。
-    拆分过程中每次失败的 (kind, detail) 都追加进 failures，不让错误信息丢失。
+    拆分过程中每次失败的 (kind, detail) 都追加进传入的 accumulator——它是
+    调用方按位置私有的列表；调用方只在该位置最终仍失败时才把记录并入归因。
     """
     mid = len(text) // 2
     pieces: list[list[float] | None] = []
@@ -121,20 +122,24 @@ def embed_chunks(texts: list[str],
         return whole, []
 
     # 2) 整批失败 → 逐条：只有坏块会掉进这里，好块单条即成功
-    failures: list[tuple[str, str]] = []   # 每次真实失败的 (kind, detail)，含拆分阶段
+    # 归因规则：只把**最终仍失败**（向量为 None）的位置的错误计入 failures；
+    # 靠拆分恢复成功的位置，其过程错误一律丢弃，不能污染"最后一次真实失败"。
+    failures: list[tuple[str, str]] = []   # (kind, detail)，按发生顺序，仅最终失败
     for i, text in enumerate(texts):
+        here: list[tuple[str, str]] = []   # 本位置的过程错误（含拆分阶段）
         v, kind, detail = _attempt([text], model)
         if v is not None:
             vectors[i] = v[0]
             continue
-        failures.append((kind, detail))
+        here.append((kind, detail))
         # 3) 单条仍失败 → 二分递归。MAX_INPUT_TOKENS*CHARS_PER_TOKEN 只是预判
         #    换算（实测限制按 token 算），所以二分不看长度，只看服务是否仍拒绝。
-        if len(text) < MIN_SPLIT_CHARS:
-            continue
-        sub = _split_embed(text, model, failures)
-        if sub and sub[0] is not None:
-            vectors[i] = sub[0]
+        if len(text) >= MIN_SPLIT_CHARS:
+            sub = _split_embed(text, model, here)
+            if sub and sub[0] is not None:
+                vectors[i] = sub[0]
+        if vectors[i] is None:
+            failures.extend(here)
 
     warnings: list[str] = []
     n_failed = sum(1 for v in vectors if v is None)
@@ -144,7 +149,8 @@ def embed_chunks(texts: list[str],
 
 
 def _failure_warning(n_failed: int, failures: list[tuple[str, str]]) -> str:
-    """从真实失败原因构造人读警告（failures 按发生顺序收集，引用最后一次失败）。
+    """从真实失败原因构造人读警告（只含最终失败位置的错误，按发生顺序，
+    引用最后一次真实失败）。
 
     原则：宁可少说、绝不误导——只有**每一条**失败都带着服务的超长证据时才
     说"超出 token 上限"；形状不符写明期望与实际；其余一律中性表述。

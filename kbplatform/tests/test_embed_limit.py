@@ -159,6 +159,38 @@ def test_embed_chunks_warning_uses_last_real_failure(monkeypatch):
     assert "期望 1 条，得到 0 条" in w, "警告里应引用最后一次真实失败"
 
 
+def test_embed_chunks_warning_only_cites_finally_failed_chunks(monkeypatch):
+    """一个块彻底失败、另一个块靠拆分恢复成功时：警告只反映彻底失败的那个块，
+    恢复成功块的过程错误不得出现（Round 2：失败归因按最终结果）。"""
+    def fake_embed(texts, model="bge-m3", keep_alive="30m"):
+        out = []
+        for t in texts:
+            if "坏块甲" in t:                      # 怎么切都含标记 → 彻底失败
+                raise RuntimeError("坏块甲第一号错误")
+            if len(t) > 2000:                      # 先拒绝，二分到 1500 后成功
+                raise RuntimeError("第二号错误 + the input length exceeds the context length")
+            out.append(_unit())
+        return out
+
+    monkeypatch.setattr(kb.llm, "embed", fake_embed)
+    texts = ["正常块内容", "坏块甲" * 500, "超长" * 1500]
+
+    vectors, warnings = embedding.embed_chunks(texts, model="bge-m3")
+
+    assert vectors[0] is not None and len(vectors[0]) == DIM
+    assert vectors[1] is None, "彻底失败的块仍显式为 None"
+    assert vectors[2] is not None and len(vectors[2]) == DIM, \
+        "超限块靠二分拆分恢复成功"
+    assert len(warnings) == 1
+    w = warnings[0]
+    assert "1 个分块向量化失败" in w, "只有彻底失败的那一个块"
+    assert "坏块甲第一号错误" in w, "警告引用最终失败块的真实错误"
+    assert "第二号错误" not in w and "exceeds the context length" not in w, \
+        "恢复成功块的过程错误不得进入警告（否则归错块）"
+    assert "超出" not in w and "2048" not in w, \
+        "token 上限断言只能来自最终失败位置的错误（恢复块的超长证据不算数）"
+
+
 # ---------------------------------------------------------------- indexer.py
 
 def _setup(tmp_path, content):
