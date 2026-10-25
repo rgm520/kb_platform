@@ -21,6 +21,7 @@ from kbplatform.fsindex import rel_key
 from kbplatform.grants import (can_read, can_write, filter_entries,
                                migrate_user_scopes, set_grants, user_grants)
 from kbplatform.paths import split_share
+from kbplatform.platform_dirs import is_platform_rel
 from kbplatform.storage import (Entry, Source, adapter_for, is_safe_rel, normalize_rel,
                                 source_from_row, test_connection)
 
@@ -383,6 +384,8 @@ def register_fs_routes(app, cfg: Config, conn, require_user, require_admin, audi
             else:
                 raise HTTPException(404, detail=f"目录不可读: {e}")
         entries = filter_entries(gs, source.id, rel, entries) if not _is_admin(user) else list(entries)
+        # 平台内部目录（_kb / _kb_trash）不展示给任何人，对管理员也一样
+        entries = [e for e in entries if not is_platform_rel(e.rel)]
 
         # 授权路径比真实目录更深时，补出「下一段」导航占位
         have = {normalize_rel(e.rel) for e in entries}

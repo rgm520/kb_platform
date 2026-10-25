@@ -11,10 +11,14 @@ import time
 
 from kbplatform.catalog import PARSEABLE_EXT
 from kbplatform.paths import norm_unc, split_share
+from kbplatform.platform_dirs import PLATFORM_DIR_NAMES
 from kbplatform.storage import Entry, Source, is_safe_rel, normalize_rel
 
-SKIP_DIR_NAMES = {"_kb_trash", "#recycle", "#snapshot", "@eaDir",
-                  "$RECYCLE.BIN", "System Volume Information"}
+# 平台内部目录（_kb/_kb_trash）取自 platform_dirs 这个唯一来源，
+# 其余是各 NAS/Windows 常见的系统与回收目录。
+SKIP_DIR_NAMES = PLATFORM_DIR_NAMES | {"#recycle", "#snapshot", "@eaDir",
+                                       "$RECYCLE.BIN",
+                                       "System Volume Information"}
 
 
 def rel_key(rel: str) -> str:

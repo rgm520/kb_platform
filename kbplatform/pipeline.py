@@ -13,6 +13,7 @@ from kbplatform.config import Config
 from kbplatform.db import init_db, upsert_catalog, bump_stats
 from kbplatform.jobs import JobQueue
 from kbplatform.monitor import Monitor
+from kbplatform.paths import is_under_root
 from kbplatform.vectors import VectorStore
 
 
@@ -36,15 +37,24 @@ class Pipeline:
         self._reconcile_pending()
 
     def _warm_snapshot(self) -> None:
-        """用 catalog 全量记录预热监控快照。
+        """用 catalog 里监控范围内的记录预热监控快照。
 
-        监控快照在内存里，服务重启后会丢。必须回填**所有**已登记文件，
-        不能只回填已完成的：否则 pending/排队中的文件每个扫描周期都会
-        被当成新增重新入队，队列随轮次越积越多（实测 8 分钟涨 800 个）。
+        监控快照在内存里，服务重启后会丢。必须回填**所有**监控范围内的
+        已登记文件，不能只回填已完成的：否则 pending/排队中的文件每个
+        扫描周期都会被当成新增重新入队，队列随轮次越积越多（实测 8 分钟
+        涨 800 个）。
+
+        同时**只预热 cfg.monitor_roots 之下的行**（UNC 归一后按目录边界
+        比较，is_under_root 就是这么做的）：catalog 里还留着历史旧账——
+        范围外的共享、1.0 引擎导出的 `_kb\\wiki\\…` 产物。这些行放快照里
+        每次轮询都会被判成"源文件已删除"，反复生成删除变更。
         """
+        roots = self.cfg.monitor_roots
         rows = self.conn.execute(
             "SELECT path, size, mtime FROM catalog").fetchall()
         for r in rows:
+            if not is_under_root(r[0], roots):
+                continue
             self.monitor._snapshot[r[0]] = (r[1] or 0, r[2] or 0.0)
 
     def _reconcile_pending(self) -> None:
