@@ -204,6 +204,8 @@ def embed_chunks(texts: list[str], model: str) -> tuple[list[list[float] | None]
 ```
 行为：先整批尝试 → 抛错或返回条数不足时，逐条尝试 → 单条仍失败时按字符数二分（上限 `MAX_INPUT_TOKENS * CHARS_PER_TOKEN`）递归重试，二分到最小仍失败则该位置置 `None` 并记一条 warning。
 
+> **实施时修正（2026-10-25，Task 0.2）**：字符换算只是**预判**——实测限制按 **token** 计（3,156 字符的单块单独就失败，而 12 块 / 20,677 token 的整批却成功），所以二分**不看长度、只等服务是否仍拒绝**；`MAX_INPUT_TOKENS * CHARS_PER_TOKEN` 仅用于预判是否值得先切一刀。
+
 - [ ] **Step 4: `indexer.index_file` 改用它**
 
 把 `vecs = llm.embed(texts, model=embed_model) if texts else []` + `if vecs: vs.add(chunk_ids, vecs)` 换成：调用 `embed_chunks`，把非 `None` 的向量与对应 `chunk_ids` 传给 `vs.add`；把 warnings 拼到 `status_detail`（**成功时也保留"部分块未向量化"的说明**，不要覆盖成 `None`）。
