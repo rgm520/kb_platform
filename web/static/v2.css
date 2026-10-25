@@ -68,7 +68,11 @@
 .desktop-head{margin:10px 0 22px}
 .desktop-head h2{margin:0;font-size:24px}
 .desktop-head p{margin:4px 0 0}
-.desktop-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:16px;max-width:1180px}
+/* 卡片自适应排布：先铺满当前这一排，放不下的才换行 */
+.desktop-grid{
+  display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
+  gap:16px;width:100%;max-width:2200px;
+}
 .desk-card{
   position:relative;display:flex;flex-direction:column;align-items:flex-start;gap:6px;
   padding:22px 20px;min-height:150px;text-align:left;border-radius:16px;
