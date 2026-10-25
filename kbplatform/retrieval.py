@@ -120,13 +120,39 @@ class Retriever:
                 LIMIT ?""", nbr_ids + nbr_ids + [limit]).fetchall()
         return [r[0] for r in rows]
 
-    def _wiki_ids_for(self, query: str, topk: int) -> list[int]:
-        """wiki 人工校正层。wiki_pages 的 id 段位与 chunk id 不重叠（>= 1_000_000）。"""
+    def _allowed_paths(self, user_id: int | None) -> set[tuple[str, str]] | None:
+        """返回允许的 (share, rel_path) 集合。None 表示不限制（管理员/内部调用）。
+
+        与 _allowed_chunk_ids 用**同一个** unified_predicate（老范围 ∪ grants）：
+        wiki 人工校正层的可见性锚点是它的源文件路径（wiki_pages.path → catalog 行），
+        所以把判定对象换成 catalog 行本身，语义与其它三路（share/rel_path）一致，
+        不另写一套授权判定。
+        """
+        if user_id is None:
+            return None
+        pred, params = unified_predicate(self.conn, user_id)
         rows = self.conn.execute(
-            "SELECT id, title, body FROM wiki_pages").fetchall()
+            f"SELECT c.share, c.rel_path FROM catalog c WHERE {pred}",
+            params).fetchall()
+        return {(r[0], r[1]) for r in rows}
+
+    def _wiki_ids_for(self, query: str, topk: int,
+                      allowed_paths: set[tuple[str, str]] | None = None) -> list[int]:
+        """wiki 人工校正层。wiki_pages 的 id 段位与 chunk id 不重叠（>= 1_000_000）。
+
+        ACL（§7.4.1，四路一个都不能少）：allowed_paths 非 None（普通用户）时，
+        只保留源文件路径落在可见范围内的候选；path 在 catalog 里解析不到
+        （share/rel_path 无法判定）的一律剔除——不得放宽。管理员（None）不受限。
+        在嵌入之前过滤：范围外的候选连向量都不算，也不进 trace。
+        """
+        rows = self.conn.execute(
+            """SELECT w.id, w.title, w.body, c.share, c.rel_path
+               FROM wiki_pages w LEFT JOIN catalog c ON c.path = w.path""").fetchall()
+        if allowed_paths is not None:
+            rows = [r for r in rows
+                    if r[3] is not None and (r[3], r[4]) in allowed_paths]
         if not rows:
             return []
-        import numpy as np
         texts = [f"{r[1] or ''}\n{r[2] or ''}" for r in rows]
         vecs = llm.embed(texts, model=self.embed_model)
         if not vecs:
@@ -149,11 +175,14 @@ class Retriever:
 
         k_ids = self._keyword(query, topk * 4)
         v_ids = self._vector(query, topk * 4)
-        wiki_ids = self._wiki_ids_for(query, 4) if use_wiki else []
 
-        # ACL 过滤（每一路都要过）
+        # ACL 过滤（每一路都要过）。wiki 路的授权锚点是源文件路径
+        # （wiki_pages.path -> catalog 的 share/rel_path），见 _allowed_paths。
         allowed = self._allowed_chunk_ids(user_id)
+        allowed_paths = self._allowed_paths(user_id) if use_wiki else None
         acl_filtered = False
+        wiki_ids = self._wiki_ids_for(query, 4, allowed_paths) if use_wiki else []
+
         if allowed is not None:
             # 记录有无被过滤掉的召回结果：轨迹里要能看出"是不是被权限压下去了"
             k_before, v_before = len(k_ids), len(v_ids)

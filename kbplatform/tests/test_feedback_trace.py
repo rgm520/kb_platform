@@ -81,7 +81,7 @@ def _stub_retrieval_routes(monkeypatch):
     def fake_vector(self, query, topk):
         return chunk_ids[1:]
 
-    def fake_wiki(self, query, topk):
+    def fake_wiki(self, query, topk, allowed_paths=None):
         return []
 
     monkeypatch.setattr("kbplatform.retrieval.Retriever._keyword", fake_keyword)
