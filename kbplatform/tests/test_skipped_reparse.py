@@ -56,8 +56,8 @@ def test_reparse_endpoint_requeues_and_allows_ocr(app, tmp_path):
     assert row[0] == "pending"
     assert row[1] == 1, "手动重跑要允许 OCR（绕过存量判定）"
     assert row[2] == 1
-    # 已入队
-    n = conn.execute("SELECT COUNT(*) FROM jobs WHERE kind='index' AND catalog_id=? "
+    # 已入队，且是**低优先级**的 index_ocr（OCR 很慢，不能挡住普通文档解析）
+    n = conn.execute("SELECT COUNT(*) FROM jobs WHERE kind='index_ocr' AND catalog_id=? "
                      "AND state='queued'", (cid,)).fetchone()[0]
     assert n == 1
 
@@ -87,7 +87,7 @@ def test_reparse_batch_queues_all_scanned_documents(app, tmp_path):
     n = conn.execute("SELECT COUNT(*) FROM catalog WHERE status='pending' AND ocr_requested=1"
                      ).fetchone()[0]
     assert n == 3
-    jobs = conn.execute("SELECT COUNT(*) FROM jobs WHERE kind='index' AND state='queued'"
+    jobs = conn.execute("SELECT COUNT(*) FROM jobs WHERE kind='index_ocr' AND state='queued'"
                         ).fetchone()[0]
     assert jobs == 3, "每个文档都要排进 jobs 表由流水线执行"
 

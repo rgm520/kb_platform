@@ -109,8 +109,12 @@ class Pipeline:
                 self.queue.enqueue("index", row[0])
 
         # 4) 执行 Tier 1（只领 index 任务）
+        #    OCR 任务（index_ocr）优先级更低：扫描件一页 136 秒，放在普通解析后面，
+        #    免得一个扫描件把整条解析队列堵住。
         while True:
             job = self.queue.claim("index")
+            if job is None:
+                job = self.queue.claim("index_ocr")
             if job is None:
                 break
             row = self.conn.execute("SELECT path FROM catalog WHERE id=?",

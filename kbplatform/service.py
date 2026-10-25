@@ -839,7 +839,7 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
                 "UPDATE catalog SET status='pending', status_detail=NULL, needs_ocr=1, "
                 "ocr_requested=1, tier1_done=0, tier2_done=0, updated_at=? WHERE id=?",
                 (time.time(), int(r["id"])))
-            q.enqueue("index", int(r["id"]), force=True)
+            q.enqueue("index_ocr", int(r["id"]), force=True)
             queued += 1
         conn.commit()
         return {"ok": True, "queued": queued, "missing": missing,
@@ -863,9 +863,11 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
             "ocr_requested=1, tier1_done=0, tier2_done=0, updated_at=? WHERE id=?",
             (time.time(), catalog_id))
         conn.commit()
-        JobQueue(conn).enqueue("index", catalog_id, force=True)
+        # 低优先级队列：OCR 很慢，不能挡住普通文档的解析
+        JobQueue(conn).enqueue("index_ocr", catalog_id, force=True)
         return {"ok": True, "queued": True, "name": d["name"],
-                "notice": "已重新排队；扫描件需要 OCR，约 136 秒/页，请稍后刷新看状态。"}
+                "notice": "已重新排队（低优先级）；扫描件需要 OCR，约 136 秒/页，"
+                          "会排在其它文档之后慢慢跑，请稍后刷新看状态。"}
 
     @app.get("/api/v1/documents/{catalog_id}/knowledge")
     def api_document_knowledge(catalog_id: int, ctx=Depends(actor)):

@@ -18,9 +18,39 @@ from kbplatform.catalog import FileRecord
 from kbplatform.config import Config
 from kbplatform.db import upsert_catalog
 from kbplatform.jobs import JobQueue
-from kbplatform.paths import split_share
+from kbplatform.paths import norm_unc, split_share
 from kbplatform.storage import adapter_for, source_from_row
 from kbplatform.vectors import VectorStore
+
+
+def index_scope_for(cfg: Config, source) -> tuple[bool, str]:
+    """这个存储源的**索引/解析范围**（相对 source.root 的子目录）。
+
+    浏览范围是整个存储源（管理员能看到共享里的全部文件夹），
+    但**只解析配置里监控的那部分**（[monitor].roots）——
+    否则一个共享里十几万文件会被全量解析，把队列和算力吃干。
+
+    返回 (是否要索引, 相对子目录)；不在监控范围 → (False, "")。
+    """
+    root = norm_unc(source.root).rstrip("\\")
+    roots = [m for m in (cfg.monitor_roots or []) if m]
+    if not roots:
+        # 没配监控根 = 这是个纯 2.0 部署，整个源都索引
+        return True, ""
+    best = None
+    for m in roots:
+        m = norm_unc(m).rstrip("\\")
+        if not m:
+            continue
+        if m.lower() == root.lower():
+            return True, ""                       # 整个源就是监控根
+        if m.lower().startswith(root.lower() + "\\"):
+            sub = m[len(root) + 1:]
+            if best is None or len(sub) < len(best):
+                best = sub
+    if best is None:
+        return False, ""
+    return True, best
 
 
 class SourceScanner:
@@ -56,8 +86,16 @@ class SourceScanner:
             try:
                 password = auth.decrypt_secret(row["secret_enc"]) if row["secret_enc"] else None
                 adapter = adapter_for(source, password)
+                want, scope = index_scope_for(self.cfg, source)
+                if not want:
+                    # 这个共享不在监控范围里：只浏览，不索引不解析
+                    self.conn.execute(
+                        "UPDATE storage_sources SET scan_state='idle', scan_error=? WHERE id=?",
+                        ("该共享不在配置的监控范围内（[monitor].roots），仅浏览不解析", sid))
+                    self.conn.commit()
+                    return {"skipped": "不在监控范围"}
                 stats = fsindex.scan_source(self.conn, source, adapter,
-                                            qps=self.cfg.scan_qps)
+                                            qps=self.cfg.scan_qps, scope=scope)
                 self._progress[sid] = stats["files"] + stats["dirs"]
                 enqueued = self._sync_catalog(source, stats)
                 self.conn.execute(

@@ -11,7 +11,7 @@ import time
 
 from kbplatform.catalog import PARSEABLE_EXT
 from kbplatform.paths import norm_unc, split_share
-from kbplatform.storage import Entry, Source, normalize_rel
+from kbplatform.storage import Entry, Source, is_safe_rel, normalize_rel
 
 SKIP_DIR_NAMES = {"_kb_trash", "#recycle", "#snapshot", "@eaDir",
                   "$RECYCLE.BIN", "System Volume Information"}
@@ -86,15 +86,34 @@ def delete_subtree(conn, source_id: int, rel: str) -> list[str]:
     return [r["rel_path"] for r in rows]
 
 
-def scan_source(conn, source: Source, adapter, qps: int = 50) -> dict:
-    """全量遍历一个存储源，增量写入路径索引。
+def scan_source(conn, source: Source, adapter, qps: int = 50, scope: str = "") -> dict:
+    """全量遍历一个存储源的**索引范围**，增量写入路径索引。
+
+    scope 是相对 source.root 的子目录（空=整个源）。范围之外的文件
+    会被移出索引（与源上已删除同理），但**不影响文件页浏览**——
+    浏览走的是实时目录，索引范围由配置里的监控根决定。
 
     单个目录读取失败只记录错误并跳过其删除判断，不能把整棵子树误删。
     """
     sid = source.id
-    existing = {r["rel_key"]: r for r in conn.execute(
+    scope = normalize_rel(scope or "")
+    if not is_safe_rel(scope):
+        scope = ""
+    all_existing = {r["rel_key"]: r for r in conn.execute(
         "SELECT id, rel_path, rel_key, is_dir, size, mtime FROM fs_entries "
         "WHERE source_id=?", (sid,))}
+    # 索引范围之外的条目（例如之前误做的全量索引）要移出索引
+    if scope:
+        skey = rel_key(scope)
+        outside = {k: v for k, v in all_existing.items()
+                   if not (k == skey or k.startswith(skey + "\\"))}
+        for row in outside.values():
+            conn.execute("DELETE FROM fs_fts WHERE rowid=?", (row["id"],))
+            conn.execute("DELETE FROM fs_entries WHERE id=?", (row["id"],))
+        conn.commit()
+        existing = {k: v for k, v in all_existing.items() if k not in outside}
+    else:
+        existing = all_existing
     seen: set[str] = set()
     failed: list[str] = []
     stats = {"files": 0, "dirs": 0, "added": 0, "updated": 0, "removed": 0,
@@ -143,7 +162,7 @@ def scan_source(conn, source: Source, adapter, qps: int = 50) -> dict:
                 time.sleep(interval)
         conn.commit()
 
-    walk("")
+    walk(scope)
 
     for key, row in existing.items():
         if key in seen:
