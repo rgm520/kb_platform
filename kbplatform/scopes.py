@@ -142,6 +142,25 @@ def grants_predicate(conn, user_id: int, alias: str = "c") -> tuple[str, list]:
     return "(" + " OR ".join(clauses) + ")", params
 
 
+def unified_predicate(conn: sqlite3.Connection, user_id: int,
+                      alias: str = "c") -> tuple[str, list]:
+    """可见范围谓词 = 老范围（user_scopes） ∪ 2.0 目录授权（grants）。
+
+    文件页、看板、检索、问答共用它：**grants 是唯一授权源**，
+    老范围只是还没迁移完的历史数据，两者都要认。
+
+    热修（2026-10-25）：检索层原来只按老范围算允许范围，管理台「目录授权」
+    （只写 grants）的用户四路召回全为 0。这里把两边并起来，SQL 层生效。
+    """
+    legacy, legacy_params = visible_predicate(user_id, alias, load_scopes(conn, user_id))
+    g_pred, g_params = grants_predicate(conn, user_id, alias)
+    if legacy == "1=0":
+        return g_pred, list(g_params)
+    if g_pred == "1=0":
+        return legacy, list(legacy_params)
+    return f"({legacy} OR {g_pred})", list(legacy_params) + list(g_params)
+
+
 def describe_scopes(scopes: list[Scope]) -> list[str]:
     out = []
     for s in scopes:

@@ -32,7 +32,7 @@ from kbplatform.fs_service import provision_sources_from_config, register_fs_rou
 from kbplatform.retrieval import Retriever
 from kbplatform.scanner import SourceScanner
 from kbplatform.scopes import (load_restricted, load_scopes, describe_scopes,
-                               is_restricted)
+                               is_restricted, unified_predicate)
 from kbplatform.vectors import VectorStore
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -638,20 +638,12 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
     def scope_predicate(user: dict) -> tuple[str, list]:
         """可见范围 SQL 谓词：管理员不受限；普通用户按 2.0 目录授权 ∪ 老范围。
 
-        两边是**同一套授权**：文件页按 grants 过滤，文档看板/检索/问答也按
-        grants 过滤（外加还没迁移的老范围），所以"能在文件页看到的文件，
-        就能在看板上看到对应文档"。
+        唯一实现在 kbplatform.scopes.unified_predicate：文件页、看板、检索、
+        问答共用同一套「grants ∪ 老范围」，改授权语义只改一处。
         """
-        from kbplatform.scopes import grants_predicate, visible_predicate
         if user["role"] == "admin":
             return "1=1", []
-        legacy = visible_predicate(user["id"], "c", load_scopes(conn, user["id"]))
-        g_pred, g_params = grants_predicate(conn, user["id"], "c")
-        if legacy[0] == "1=0":
-            return g_pred, g_params
-        if g_pred == "1=0":
-            return legacy
-        return f"({legacy[0]} OR {g_pred})", list(legacy[1]) + list(g_params)
+        return unified_predicate(conn, user["id"], "c")
 
     # ============================================================ 图谱
     @app.get("/api/v1/graph/search")

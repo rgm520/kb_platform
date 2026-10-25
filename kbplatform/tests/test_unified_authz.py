@@ -130,3 +130,116 @@ def test_legacy_scope_api_writes_grants(app):
     # 文件页立刻能用
     srcs = c.get("/api/v1/fs/sources").json()["sources"]
     assert [s["name"] for s in srcs] == [SHARE]
+
+
+# ================= 热修 2026-10-25：检索层认 grants =================
+# 管理台「目录授权」只写 grants（没有 user_scopes 行）后，看板能看到文档，
+# 但 /api/v1/search 与 /api/v1/query 四路召回全为 0：
+# retrieval._allowed_chunk_ids 只按老范围（visible_predicate）算，
+# grants-only 用户的 chunk 全被 SQL 层过滤掉了。
+
+import kb.llm as llm                                              # noqa: E402
+from kbplatform import fts                                        # noqa: E402
+
+_CHUNK_TEXT = "服务器 硬件 更换验收记录"
+
+
+def _seed_local_doc(app, tmp_path, username, grant=True, text=_CHUNK_TEXT,
+                    rel="AI知识库\\办法.md"):
+    """本地存储源 + catalog 行 + chunk，可选给 username 一条 grants（只写 grants）。"""
+    conn = app.state.conn
+    dir_src = tmp_path / "本地库"
+    dir_src.mkdir(parents=True, exist_ok=True)
+    conn.execute(
+        "INSERT INTO storage_sources(name,kind,root,enabled,writable,created_at) "
+        "VALUES ('本地库','local',?,1,1,0)", (str(dir_src),))
+    sid = conn.execute("SELECT id FROM storage_sources WHERE name='本地库'").fetchone()[0]
+    uid = conn.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()[0]
+    if grant:
+        # 管理台「目录授权」的实际效果：grants 表插一行，**不写** user_scopes
+        conn.execute(
+            "INSERT INTO grants(user_id,source_id,subpath,can_write) VALUES (?,?,?,0)",
+            (uid, sid, "AI知识库"))
+    path = str(dir_src / rel)
+    upsert_catalog(conn, FileRecord(path=path, share="本地库", rel_path=rel,
+                                    name="办法.md", ext=".md",
+                                    size=10, mtime=1700000000.0))
+    conn.execute("INSERT INTO chunks(file_path,chunk_idx,text,locator) VALUES (?,0,?,'1段')",
+                 (path, text))
+    chunk_id = conn.execute("SELECT id FROM chunks WHERE file_path=?", (path,)).fetchone()[0]
+    conn.commit()
+    # keyword 通道走真实 FTS（不依赖 embedding 服务）
+    fts.build_index(app.state.cfg.fts_path, [(chunk_id, text)])
+    return path
+
+
+def test_retrieval_sees_documents_for_grants_only_user(app, tmp_path, monkeypatch):
+    """grants-only 用户（没有 user_scopes 行）的文档必须能被检索层看见。"""
+    c, _ = _login(app, "zhangsan")
+    path = _seed_local_doc(app, tmp_path, "zhangsan")
+    monkeypatch.setattr(llm, "embed", lambda *a, **k: [])   # 不依赖真实 embedding 服务
+    r = c.post("/api/v1/search", json={"query": "验收"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    hits = [x for x in body["results"] if x["path"] == path]
+    assert hits, f"grants-only 用户搜不到已授权目录下的文档：total={body['total']} stats={body['stats']}"
+    assert "keyword" in hits[0]["matched_by"], f"keyword 通道没有召回：{body['stats']}"
+
+
+def test_retrieval_blocks_user_without_any_grant(app, tmp_path, monkeypatch):
+    """既没有 grants 也没有 user_scopes 的用户：什么都搜不到（不得放宽）。
+
+    先让管理员搜到同一篇，证明召回链路是通的，total==0 才是过滤的结果。
+    """
+    c_admin, _ = _login(app, "admin", role="admin")
+    c_user, _ = _login(app, "lisi")
+    path = _seed_local_doc(app, tmp_path, "admin")   # 造数据，不给 lisi 任何授权
+    monkeypatch.setattr(llm, "embed", lambda *a, **k: [])
+    r_admin = c_admin.post("/api/v1/search", json={"query": "验收"}).json()
+    assert any(x["path"] == path for x in r_admin["results"]), \
+        f"管理员都搜不到，召唤链路有问题，过滤结论不成立：{r_admin['stats']}"
+    r_user = c_user.post("/api/v1/search", json={"query": "验收"}).json()
+    assert r_user["total"] == 0, f"无任何授权的用户搜出了结果：{r_user['results']}"
+
+
+def test_board_and_search_agree_on_visibility(app, tmp_path, monkeypatch):
+    """同一个 grants-only 用户：看板能看到的文档，检索也命中同一篇。"""
+    c, _ = _login(app, "zhangsan")
+    path = _seed_local_doc(app, tmp_path, "zhangsan")
+    monkeypatch.setattr(llm, "embed", lambda *a, **k: [])
+    docs = c.get("/api/v1/documents?page=1&page_size=20").json()
+    assert docs["total"] >= 1, "看板看不到 grants-only 用户的文档"
+    body = c.post("/api/v1/search", json={"query": "验收"}).json()
+    assert body["total"] >= 1 and any(x["path"] == path for x in body["results"]), \
+        f"看板与检索范围不一致：documents total={docs['total']}，search total={body['total']}"
+
+
+def test_unified_predicate_is_or_of_legacy_and_grants(conn):
+    """既有老范围又有 grants 的用户：谓词要同时含两边的子句与参数。"""
+    from kbplatform.scopes import unified_predicate
+    conn.execute(
+        "INSERT INTO users(id,username,password_hash,role) VALUES (9,'u9','x','user')")
+    conn.execute("INSERT INTO user_scopes(user_id,share,subpath) VALUES (9,'共享A','制度')")
+    conn.execute(
+        "INSERT INTO storage_sources(id,name,kind,root,enabled,created_at) "
+        "VALUES (3,'库','local','D:/库',1,0)")
+    conn.execute("INSERT INTO grants(user_id,source_id,subpath,can_write) VALUES (9,3,'项目',0)")
+    conn.commit()
+    pred, params = unified_predicate(conn, 9, "c")
+    assert " OR " in pred, f"老范围与 grants 应该 OR 起来：{pred}"
+    assert "c.share" in pred and "c.path" in pred, f"两边都该出现在谓词里：{pred}"
+    sparams = [str(p) for p in params]
+    assert "共享A" in sparams, f"老范围侧的参数不在 params 里：{sparams}"
+    assert any(str(p).startswith("d:/库\\项目") for p in sparams), \
+        f"grants 侧的参数不在 params 里：{sparams}"
+
+
+def test_unified_predicate_blocks_user_without_any_grant(conn):
+    """两边都没有授权：返回 ("1=0", [])，钉住「不得放宽」。"""
+    from kbplatform.scopes import unified_predicate
+    conn.execute(
+        "INSERT INTO users(id,username,password_hash,role) VALUES (9,'u9','x','user')")
+    conn.commit()
+    pred, params = unified_predicate(conn, 9, "c")
+    assert (pred, params) == ("1=0", []), \
+        f"没有任何授权的用户必须什么都看不到：{pred!r} {params!r}"

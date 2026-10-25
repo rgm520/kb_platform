@@ -19,7 +19,7 @@ import kb.llm as llm
 
 from kbplatform import fts
 from kbplatform.scopes import (load_scopes, load_restricted, restricted_predicate,
-                               visible_predicate)
+                               unified_predicate)
 from kbplatform.vectors import VectorStore
 
 
@@ -73,8 +73,7 @@ class Retriever:
         """返回允许的 chunk_id 集合。None 表示不限制（管理员/内部调用）。"""
         if user_id is None:
             return None
-        scopes = load_scopes(self.conn, user_id)
-        pred, params = visible_predicate(user_id, "c", scopes)
+        pred, params = unified_predicate(self.conn, user_id, "c")
         rows = self.conn.execute(
             f"""SELECT ch.id FROM chunks ch JOIN catalog c ON c.path = ch.file_path
                 WHERE {pred}""", params).fetchall()
