@@ -78,6 +78,7 @@
 - Modify: `kbplatform/pipeline.py:38-48`（`_warm_snapshot` 只预热监控范围内的路径）
 - Modify: `kbplatform/fs_service.py:385`（`fs_list` 过滤平台目录）
 - Create: `kbplatform/platform_dirs.py`（平台内部目录名单的唯一来源）
+- Create: `tools/clean-internal-entries.py`（一次性清理脚本，幂等，先 `--dry-run`）
 - Test: `kbplatform/tests/test_internal_dirs.py`
 
 **Interfaces:**
