@@ -263,9 +263,14 @@ body.fm-preview-open .fm-shell{grid-template-columns:230px minmax(0,1fr) minmax(
 .card-stat .sub{font-size:11px;margin-top:2px}
 
 /* 重复文档分组视图 */
-.dup-group{border:1px solid var(--line);border-radius:10px;margin-bottom:14px;overflow:hidden;background:var(--panel)}
+.dup-group{border:1px solid var(--line);border-radius:10px;margin-bottom:10px;overflow:hidden;background:var(--panel)}
+.dup-group.collapsed{margin-bottom:6px}
 .dup-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:9px 12px;background:#121a22;border-bottom:1px solid var(--line)}
+.dup-group.collapsed .dup-head{border-bottom:0}
 .dup-head .md5{font-family:Consolas,monospace;font-size:12px;color:var(--tech)}
+.dup-tw{background:transparent;border:0;color:var(--tech);padding:0 4px;font-size:13px;cursor:pointer;line-height:1}
+.dup-preview{flex:1;min-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
+.dup-keep{font-size:12px;color:var(--tech);opacity:.85;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dup-group table{width:100%}
 .dup-group td,.dup-group th{padding:7px 10px}
 .dup-group label.chk{flex-direction:row;align-items:center;gap:6px;cursor:pointer}

@@ -208,6 +208,7 @@ async function loadDuplicates() {
     const r = await api("/api/v1/documents/duplicates");
     state.duplicates = r.groups || [];
     state.dupSel = {};
+    state.dupCollapsed = {};      // 默认全部折叠
     renderDuplicates(box, r);
   } catch (e) {
     box.innerHTML = `<p class="err">重复文件统计失败：${esc(e.message)}</p>`;
@@ -230,34 +231,64 @@ function renderDuplicates(box, r) {
   const head = `<div class="page-head" style="margin:2px 0 10px">
       <div><h3 style="margin:0">重复文档（${r.group_count} 组 / ${r.file_count} 份）</h3>
         <p class="muted" style="margin:4px 0 0">按 <b>MD5 内容哈希</b>判定（不是文件名）。
-          勾选要删的重复件，每组会保留一份；删除的文件进回收站（可恢复）。</p></div>
+          展开一组可勾选要删的重复件，每组会保留一份；删除的文件进回收站（可恢复）。</p></div>
       <button onclick="state.boardView='docs'; renderBoardBody(); loadDocs();">← 返回文档清单</button>
     </div>`;
-  const body = groups.map((g, gi) => `
-    <div class="dup-group">
+  const body = groups.map((g, gi) => {
+    // 默认折叠（只有显式设为 false 才是展开）
+    const collapsed = state.dupCollapsed[gi] !== false;
+    // 默认选择：保留第一份，其余勾选为"要删"（只在首次进入该组时设定，
+    // 否则会把用户的"全不选/手动取消勾选"覆盖回去）
+    if (!state.dupSel[gi]) {
+      state.dupSel[gi] = { keep: g.items[0] ? g.items[0].id : null, del: {} };
+      g.items.forEach((it, i) => { if (i > 0) state.dupSel[gi].del[it.id] = true; });
+    }
+    const sel = state.dupSel[gi];
+    const names = g.items.map((it) => it.name).join("、");
+    const preview = names.length > 90 ? names.slice(0, 90) + "…" : names;
+    const keepItem = g.items.find((x) => String(x.id) === String(sel.keep)) || g.items[0];
+    return `
+    <div class="dup-group ${collapsed ? "collapsed" : ""}">
       <div class="dup-head">
+        <button class="dup-tw" onclick="dupToggleGroup(${gi})" title="${collapsed ? "展开" : "折叠"}">${collapsed ? "▸" : "▾"}</button>
         <span class="md5">MD5 ${esc(g.md5.slice(0, 12))}…</span>
         <span class="muted">${g.count} 份 · 每份 ${fmtBytes(g.size)}</span>
+        <span class="muted dup-preview" title="${esc(names)}">${esc(preview)}</span>
+        <span class="muted dup-keep">保留：${esc(keepItem ? keepItem.name : "-")}</span>
         <button class="sm" onclick="dupSelectAll(${gi}, true)">全选</button>
         <button class="sm" onclick="dupSelectAll(${gi}, false)">全不选</button>
         <button class="sm primary" onclick="dupResolve(${gi})">删除所选（保留一份）</button>
       </div>
+      ${collapsed ? "" : `
       <table><thead><tr><th>保留这份</th><th>文件</th><th>所在目录</th><th>大小</th><th>修改时间</th><th>状态</th></tr></thead><tbody>
         ${g.items.map((it, ii) => `
           <tr>
-            <td><input type="radio" name="dupkeep-${gi}" ${ii === 0 ? "checked" : ""}
-                       onchange="state.dupSel[${gi}] = state.dupSel[${gi}] || {}; state.dupSel[${gi}].keep = ${it.id};"></td>
-            <td><label class="chk"><input type="checkbox" ${ii === 0 ? "" : "checked"}
+            <td><input type="radio" name="dupkeep-${gi}" value="${it.id}" ${String(it.id) === String(sel.keep) ? "checked" : ""}
+                       onchange="dupSetKeep(${gi}, ${it.id})"></td>
+            <td><label class="chk"><input type="checkbox" ${sel.del[it.id] ? "checked" : ""}
                        onchange="dupToggle(${gi}, ${it.id}, this.checked)"> ${esc(it.name)}</label></td>
             <td class="muted">${esc(it.share)} / ${esc(it.rel_path || "")}</td>
             <td class="muted">${fmtBytes(it.size)}</td>
             <td class="muted">${it.mtime ? new Date(it.mtime * 1000).toLocaleString("zh-CN") : "-"}</td>
             <td class="muted">${statusText(it.status)}</td>
           </tr>`).join("")}
-      </tbody></table>
-    </div>`).join("");
+      </tbody></table>`}
+    </div>`;
+  }).join("");
   box.innerHTML = head + body;
 }
+window.dupToggleGroup = (gi) => {
+  const was = state.dupCollapsed[gi] !== false;   // 现在是折叠的？
+  state.dupCollapsed[gi] = was ? false : true;    // 折叠→展开 / 展开→折叠
+  renderDuplicates(document.getElementById("doc-stats"), {});
+};
+window.dupSetKeep = (gi, id) => {
+  const sel = state.dupSel[gi] || (state.dupSel[gi] = { keep: null, del: {} });
+  sel.keep = id;
+  // 保留的这一份不能同时被勾成"要删"
+  delete sel.del[id];
+  renderDuplicates(document.getElementById("doc-stats"), {});
+};
 function dupToggle(gi, id, on) {
   state.dupSel[gi] = state.dupSel[gi] || { keep: null, del: {} };
   if (on) state.dupSel[gi].del[id] = true; else delete state.dupSel[gi].del[id];
@@ -265,16 +296,19 @@ function dupToggle(gi, id, on) {
 function dupSelectAll(gi, on) {
   const g = (state.duplicates || [])[gi];
   if (!g) return;
-  state.dupSel[gi] = state.dupSel[gi] || { keep: null, del: {} };
-  state.dupSel[gi].del = {};
-  if (on) g.items.forEach((it, i) => { if (i > 0) state.dupSel[gi].del[it.id] = true; });
+  const sel = state.dupSel[gi] || (state.dupSel[gi] = {
+    keep: g.items[0] ? g.items[0].id : null, del: {},
+  });
+  sel.del = {};
+  if (on) g.items.forEach((it) => { if (String(it.id) !== String(sel.keep)) sel.del[it.id] = true; });
   renderDuplicates(document.getElementById("doc-stats"), {});
 }
 window.dupResolve = async (gi) => {
   const g = (state.duplicates || [])[gi];
   if (!g) return;
-  const sel = state.dupSel[gi] || { del: {} };
-  const keepId = (document.querySelector(`input[name="dupkeep-${gi}"]:checked`) || {}).value;
+  const sel = state.dupSel[gi] || { keep: null, del: {} };
+  // 保留项从状态里取（折叠时单选按钮不在 DOM 里）
+  const keepId = sel.keep || (g.items[0] ? g.items[0].id : null);
   const delIds = Object.keys(sel.del || {}).map(Number).filter((x) => x !== Number(keepId));
   if (!delIds.length) { toast("请先勾选要删除的重复件（每组至少保留一份）"); return; }
   const keep = g.items.find((x) => String(x.id) === String(keepId)) || g.items[0];
