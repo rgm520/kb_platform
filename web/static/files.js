@@ -9,7 +9,7 @@ window.KB = window.KB || {};
     byRel: new Map(), viewOrder: [], collapsed: new Set(),
     canWrite: false, selected: new Set(), lastRel: "",
     search: [], searchIndex: -1, searchTimer: 0, ctxEntry: null,
-    uploads: 0,
+    contentSearch: [], uploads: 0,
   };
 
   const IMAGE = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "ico"]);
@@ -604,9 +604,21 @@ window.KB = window.KB || {};
         hideSearch();
       }
     });
+    // 「搜正文」开关：勾上时把输入框里已有的词立刻搜一遍；清空则收起
+    const cb = $("#fm-content-search");
+    if (cb && !cb.dataset.bound) {
+      cb.dataset.bound = "1";
+      cb.addEventListener("change", () => {
+        const q = input.value.trim();
+        if (q) { clearTimeout(state.searchTimer); runSearch(q); }
+        else hideContentSearch();
+      });
+    }
   }
 
   async function runSearch(q) {
+    const cb = $("#fm-content-search");
+    if (!cb || !cb.checked) hideContentSearch();
     try {
       const r = await api(`/api/v1/fs/search?q=${encodeURIComponent(q)}&limit=30`);
       state.search = r.results || [];
@@ -616,6 +628,14 @@ window.KB = window.KB || {};
       state.search = [];
       renderSearch("搜索失败：" + e.message);
     }
+    // 「搜正文」勾选时，同一个词再走一遍全文检索（与文件名秒搜并列展示）
+    if (cb && cb.checked) await searchContent(q, 10).then((hits) => {
+      state.contentSearch = hits;
+      renderContentSearch();
+    }).catch((e) => {
+      state.contentSearch = [];
+      renderContentSearch("正文搜索失败：" + e.message);
+    });
   }
 
   function renderSearch(err) {
@@ -637,7 +657,8 @@ window.KB = window.KB || {};
   }
 
   function paintSearchActive() {
-    $$(".fm-search-item").forEach((el) => el.classList.toggle("active", Number(el.dataset.i) === state.searchIndex));
+    const box = $("#fm-search-results");
+    $$(".fm-search-item", box).forEach((el) => el.classList.toggle("active", Number(el.dataset.i) === state.searchIndex));
   }
 
   function hideSearch() {
@@ -645,6 +666,74 @@ window.KB = window.KB || {};
     if (box) box.classList.add("hidden");
     state.search = [];
     state.searchIndex = -1;
+    hideContentSearch();
+  }
+
+  /* ------------------------------------------------------------ 搜正文
+     后端 POST /api/v1/search：关键词+向量双路，chunk 级片段；
+     scope 过滤在后端做（grants 是唯一授权源），前端不做二次过滤。 */
+  const ROUTE_NAMES = { keyword: "关键词", vector: "语义", graph: "图谱", wiki: "校正" };
+
+  async function searchContent(query, topK) {
+    const r = await api("/api/v1/search", { method: "POST", body: {
+      query: query, top_k: topK || 10 } });
+    return r.results || [];
+  }
+
+  function dirLabel(path) {
+    // path 形如 \\nas\share\目录\文件.pdf → 取「源 / 目录」作定位提示
+    const parts = String(path || "").split("\\").filter(Boolean);
+    if (parts.length < 3) return "";
+    return parts[parts.length - 3] + " / " + parts[parts.length - 2];
+  }
+
+  function renderContentSearch(err) {
+    const box = $("#fm-content-results");
+    if (!box) return;
+    box.classList.remove("hidden");
+    const hits = state.contentSearch || [];
+    if (!hits.length) {
+      box.innerHTML = `<div class="fm-search-empty">${esc(err || "正文没有匹配")}</div>`;
+      return;
+    }
+    box.innerHTML = hits.map((h, i) => {
+      const snippet = h.restricted ? "涉密·原文不回传" : (h.snippet || "");
+      const tags = (h.matched_by || []).map((m) => ROUTE_NAMES[m] || m).join(" / ");
+      return `<div class="fm-search-item" data-i="${i}">
+        <div>${esc(h.file)}${tags ? `<span class="tag">${esc(tags)}</span>` : ""}</div>
+        <div class="p">${esc(dirLabel(h.path))}</div>
+        <div class="s">${esc(snippet)}</div>
+      </div>`;
+    }).join("");
+    $$(".fm-search-item", box).forEach((el) => {
+      el.addEventListener("mousedown", (ev) => {
+        ev.preventDefault();
+        activateContent(hits[Number(el.dataset.i)]);
+      });
+    });
+  }
+
+  function hideContentSearch() {
+    const box = $("#fm-content-results");
+    if (box) box.classList.add("hidden");
+    state.contentSearch = [];
+  }
+
+  async function activateContent(hit) {
+    if (!hit) return;
+    hideSearch();
+    const input = $("#fm-search");
+    if (input) input.value = "";
+    let info = null;
+    try {
+      info = await api(`/api/v1/documents/${hit.document_id}/file`);
+    } catch (e) { toast("定位失败：" + e.message, 5000); return; }
+    if (info && info.in_fs && info.source_id != null) {
+      // 跳到该文件所在目录：复用看板「定位」同一套 openAt/pendingAt 交接
+      await openAt(info.source_id, info.rel, false);
+    } else {
+      toast("该文件还未接入 2.0 文件页");
+    }
   }
 
   async function activateSearch(i) {
@@ -902,6 +991,8 @@ window.KB = window.KB || {};
       if (ev.key === "Escape") {
         if (!$("#fm-preview").classList.contains("hidden")) closePreview();
         else if (!$("#fm-ctx").classList.contains("hidden")) hideCtx();
+        else if (!$("#fm-search-results").classList.contains("hidden")
+                 || !$("#fm-content-results").classList.contains("hidden")) hideSearch();
         return;
       }
       if (ev.key === "Delete" || ev.key === "Backspace") {
@@ -917,7 +1008,9 @@ window.KB = window.KB || {};
     });
     document.addEventListener("click", (ev) => {
       if (!$("#fm-ctx").contains(ev.target) && !ev.target.closest(".fm-row")) hideCtx();
-      if (!$("#fm-search-results").contains(ev.target) && ev.target.id !== "fm-search") hideSearch();
+      const onSearchUI = ev.target.closest
+        && ev.target.closest("#fm-search, .fm-csearch, #fm-search-results, #fm-content-results");
+      if (!onSearchUI) hideSearch();
     });
     window.addEventListener("resize", hideCtx);
   }
@@ -951,6 +1044,7 @@ window.KB = window.KB || {};
   KB.files = {
     load, open, openAt, refresh: () => open(state.sourceId, state.rel),
     preview, closePreview, upload, deleteSelected,
+    searchContent,
     getState: () => state,
   };
   KB.trash = { load: trashLoad, restore: trashRestore, purge: trashPurge };

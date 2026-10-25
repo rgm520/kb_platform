@@ -103,6 +103,8 @@
             <div id="fm-crumbs" class="fm-crumbs"></div>
             <div class="fm-actions">
               <input id="fm-search" placeholder="按文件名秒搜…" autocomplete="off">
+              <label class="fm-csearch" title="同时搜索文件正文（记不住文件名时按内容找）">
+                <input type="checkbox" id="fm-content-search">搜正文</label>
               <select id="fm-sort" title="排序方式">
                 <option value="mtime">修改时间</option>
                 <option value="name">名称</option>
@@ -126,6 +128,7 @@
             </div>
           </div>
           <div id="fm-search-results" class="fm-search-results hidden"></div>
+          <div id="fm-content-results" class="fm-search-results hidden"></div>
           <div id="fm-table-wrap" class="fm-table-wrap">
             <table class="fm-table">
               <thead><tr>
