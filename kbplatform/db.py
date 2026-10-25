@@ -285,6 +285,33 @@ CREATE TABLE IF NOT EXISTS model_usage (
   output_tokens  INTEGER DEFAULT 0,
   UNIQUE(user_id, model_id, day)
 );
+
+-- 答案反馈：「这个答案没用」的显式信号。只存打分与备注，不含原文。
+CREATE TABLE IF NOT EXISTS query_feedback (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  request_id TEXT NOT NULL,
+  user_id    INTEGER,
+  rating     TEXT NOT NULL,
+  comment    TEXT,
+  created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_request ON query_feedback(request_id);
+
+-- 检索轨迹：一次问答到底召回了什么、被哪路压下去了。
+-- 只存 chunk id / 名次 / 分数 / 命中通道；问题只存 sha256 前 16 位，
+-- 绝不存原文片段、文件路径或问题原文（审计红线）。
+CREATE TABLE IF NOT EXISTS retrieval_traces (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  request_id    TEXT NOT NULL,
+  user_id       INTEGER,
+  question_hash TEXT NOT NULL,
+  route_stats   TEXT NOT NULL,
+  candidates    TEXT NOT NULL,
+  top_ids       TEXT NOT NULL,
+  created_at    REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_traces_request ON retrieval_traces(request_id);
+CREATE INDEX IF NOT EXISTS idx_traces_created ON retrieval_traces(created_at);
 """
 
 

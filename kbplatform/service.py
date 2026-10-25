@@ -89,6 +89,12 @@ class SearchReq(BaseModel):
     file_type: Optional[list[str]] = None
 
 
+class FeedbackReq(BaseModel):
+    """答案反馈：rating 三选一，comment 可选（wrong_cite 常带一句说明）。"""
+    rating: str                      # up | down | wrong_cite
+    comment: Optional[str] = None
+
+
 class LoginReq(BaseModel):
     username: str
     password: str
@@ -410,7 +416,9 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
                  ip=None, want_text=False, audit_uid=None):
         # user_id  = 可见范围过滤用的用户 id（管理员为 None = 不限）
         # audit_uid= 审计归属用的真实用户 id（管理员也要记上，否则查不到是谁在用）
-        hits, stats = retriever.retrieve(req.question, user_id=user_id, topk=req.top_k)
+        trace: dict = {}   # 检索轨迹出参：四路召回 id / 融合名次 / 是否被 ACL 压掉
+        hits, stats = retriever.retrieve(req.question, user_id=user_id,
+                                         topk=req.top_k, trace=trace)
         restricted = any(h.restricted for h in hits)
         requested, local_models = pick_model(conn, model_ref, user_id)
         used, switched = models_mod.route_for(restricted, requested, local_models)
@@ -453,6 +461,25 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
                 "usage": usage, "request_id": "req_" + secrets.token_hex(6)}
         if restricted:
             resp["restricted_notice"] = "本次回答命中涉密内容，已锁定本地模型，且未回传片段原文"
+
+        # 检索轨迹：让"不准"变得可度量。只存 chunk id / 分数 / 命中通道，
+        # 问题只存哈希前 16 位——轨迹表与审计分开（审计有 question，轨迹没有，
+        # 因为轨迹会被更多眼睛看到）。落轨迹失败只记日志，绝不把问答变 500。
+        try:
+            trace_owner = audit_uid if audit_uid is not None else user_id
+            write_with_retry(
+                conn,
+                "INSERT INTO retrieval_traces(request_id, user_id, question_hash,"
+                " route_stats, candidates, top_ids, created_at) VALUES (?,?,?,?,?,?,?)",
+                (resp["request_id"], trace_owner,
+                 hashlib.sha256(req.question.encode()).hexdigest()[:16],
+                 json.dumps(stats, ensure_ascii=False),
+                 json.dumps(trace, ensure_ascii=False),
+                 json.dumps([h.chunk_id for h in hits]),
+                 time.time()))
+        except Exception as e:
+            print(f"[trace] 轨迹写入异常 request_id={resp['request_id']}: "
+                  f"{type(e).__name__}: {e}", flush=True)
         return resp, hits, restricted, used
 
     @app.post("/api/v1/query")
@@ -465,6 +492,90 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
                                  want_text=req.include_text,
                                  audit_uid=u["id"])
         return resp
+
+    FEEDBACK_RATINGS = ("up", "down", "wrong_cite")
+
+    @app.post("/api/v1/query/{request_id}/feedback")
+    def api_query_feedback(request_id: str, req: FeedbackReq, ctx=Depends(actor)):
+        """答案反馈：用户点「没用」，这里记下来。
+
+        反馈是旁路数据：写库失败也**绝不能**报错给用户——用户点了"没用"
+        却看到 500，比不记录更糟（参考 audit() 的容错风格）。
+        """
+        if req.rating not in FEEDBACK_RATINGS:
+            raise HTTPException(400, detail="rating 必须是 up / down / wrong_cite 之一")
+        comment = (req.comment or "").strip() or None
+        ok = write_with_retry(
+            conn,
+            "INSERT INTO query_feedback(request_id, user_id, rating, comment,"
+            " created_at) VALUES (?,?,?,?,?)",
+            (request_id, ctx["user"]["id"], req.rating, comment, time.time()))
+        if not ok:
+            print(f"[feedback] 数据库繁忙，丢弃一条反馈 request_id={request_id}",
+                  flush=True)
+        # 就算写库失败也返回 ok：反馈丢失可以接受，用户体验断裂不可以
+        return {"ok": True}
+
+    @app.get("/api/v1/admin/traces")
+    def admin_traces(limit: int = 50, ctx=Depends(require_admin)):
+        """检索轨迹列表（仅管理员）：时间 / request_id / 各路召回数 / 反馈情况。
+
+        与审计不同，这里**没有** question 原文——轨迹会被管理员反复查看，
+        按红线只保留问题哈希，需要看问题原文去 audit_log 对 request 时间段查。
+        """
+        rows = conn.execute(
+            """SELECT t.id, t.request_id, t.user_id, u.username, t.question_hash,
+                      t.route_stats, t.created_at,
+                      (SELECT f.rating FROM query_feedback f
+                        WHERE f.request_id=t.request_id
+                        ORDER BY f.id DESC LIMIT 1) AS feedback_rating,
+                      (SELECT f.comment FROM query_feedback f
+                        WHERE f.request_id=t.request_id
+                        ORDER BY f.id DESC LIMIT 1) AS feedback_comment
+               FROM retrieval_traces t LEFT JOIN users u ON u.id=t.user_id
+               ORDER BY t.id DESC LIMIT ?""",
+            (max(1, min(500, limit)),)).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["route_stats"] = json.loads(d["route_stats"])
+            except Exception:
+                d["route_stats"] = {}
+            out.append(d)
+        return {"traces": out}
+
+    @app.get("/api/v1/admin/traces/{request_id}")
+    def admin_trace_detail(request_id: str, ctx=Depends(require_admin)):
+        """单条轨迹详情（仅管理员）：四路召回 id、融合名次与命中通道。
+
+        管理员在这里回答"这次到底召回了什么、被哪路压下去了"，
+        是后续检索优化的定位依据。
+        """
+        r = conn.execute(
+            "SELECT id, request_id, user_id, question_hash, route_stats,"
+            " candidates, top_ids, created_at FROM retrieval_traces"
+            " WHERE request_id=?", (request_id,)).fetchone()
+        if r is None:
+            raise HTTPException(404, detail="没有这条轨迹")
+        trace = json.loads(r["candidates"])
+        try:
+            stats = json.loads(r["route_stats"])
+        except Exception:
+            stats = {}
+        try:
+            top_ids = json.loads(r["top_ids"])
+        except Exception:
+            top_ids = []
+        fb = conn.execute(
+            "SELECT rating, comment FROM query_feedback WHERE request_id=?"
+            " ORDER BY id DESC LIMIT 1", (request_id,)).fetchone()
+        return {"trace": {"request_id": r["request_id"], "user_id": r["user_id"],
+                          "question_hash": r["question_hash"],
+                          "created_at": r["created_at"],
+                          "route_stats": stats, "top_ids": top_ids,
+                          "feedback": dict(fb) if fb else None,
+                          **trace}}
 
     @app.post("/api/v1/search")
     def api_search(req: SearchReq, ctx=Depends(actor)):

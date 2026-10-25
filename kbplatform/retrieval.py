@@ -143,7 +143,8 @@ class Retriever:
     # ------------------------------------------------------------ 融合
     def retrieve(self, query: str, user_id: int | None = None,
                  topk: int = 8, use_graph: bool = True,
-                 use_wiki: bool = True) -> tuple[list[Hit], dict]:
+                 use_wiki: bool = True,
+                 trace: dict | None = None) -> tuple[list[Hit], dict]:
         scopes = load_scopes(self.conn, user_id) if user_id is not None else []
         restricted = load_restricted(self.conn)
 
@@ -153,9 +154,13 @@ class Retriever:
 
         # ACL 过滤（每一路都要过）
         allowed = self._allowed_chunk_ids(user_id)
+        acl_filtered = False
         if allowed is not None:
+            # 记录有无被过滤掉的召回结果：轨迹里要能看出"是不是被权限压下去了"
+            k_before, v_before = len(k_ids), len(v_ids)
             k_ids = [i for i in k_ids if i in allowed]
             v_ids = [i for i in v_ids if i in allowed]
+            acl_filtered = len(k_ids) < k_before or len(v_ids) < v_before
 
         ranked_lists = [k_ids, v_ids]
         g_ids: list[int] = []
@@ -164,7 +169,10 @@ class Retriever:
             # 图谱结果同样必须过 ACL：种子在范围内，扩展出的邻居未必在。
             # 漏掉这一步就是越权路径（chunk_meta 只 join catalog，不查 scope）。
             if allowed is not None:
+                g_before = len(g_ids)
                 g_ids = [i for i in g_ids if i in allowed]
+                if len(g_ids) < g_before:
+                    acl_filtered = True
             ranked_lists.append(g_ids)
         if wiki_ids:
             ranked_lists.append(wiki_ids)
@@ -208,6 +216,15 @@ class Retriever:
             hits.append(Hit(cid, m["file_path"], m["share"], m["rel_path"],
                             m["text"], m["locator"], sc, matched.get(cid, []), rest,
                             m.get("document_id")))
+
+        if trace is not None:
+            # 轨迹只记 id / 名次 / 分数 / 命中通道，绝不记原文或文件路径。
+            # 这是"不准"可度量的原始依据：管理员从这里看这次到底召回了什么。
+            trace["routes"] = {"keyword": list(k_ids), "vector": list(v_ids),
+                               "graph": list(g_ids), "wiki": list(wiki_ids)}
+            trace["fused"] = [{"chunk_id": int(c), "score": float(s),
+                               "routes": matched.get(c, [])} for c, s in scored]
+            trace["acl_filtered"] = acl_filtered
 
         return hits, {"keyword": len(k_ids), "vector": len(v_ids),
                       "wiki": len(wiki_ids), "graph": len(g_ids)}

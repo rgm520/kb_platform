@@ -1014,6 +1014,7 @@ async function ask() {
   if (!q) return;
   const btn = $("#a-go"); btn.disabled = true; btn.textContent = "思考中…";
   $("#a-notice").classList.add("hidden");
+  $("#a-feedback").classList.add("hidden");
   try {
     const r = await api("/api/v1/query", { method: "POST", body: { question: q, model: $("#a-model").value, top_k: 8 } });
     $("#a-answer").textContent = r.answer || "(无输出)";
@@ -1022,6 +1023,8 @@ async function ask() {
       n.textContent = r.restricted_notice || "本次回答命中涉密内容，已锁定本地模型且未回传片段原文";
       n.classList.remove("hidden");
     }
+    // 答案反馈（Task 0.3）：request_id 要原样回传，后台轨迹靠它对上号
+    renderAskFeedback(r.request_id);
     const box = $("#a-cites"); box.innerHTML = "";
     (r.citations || []).forEach((c, i) => {
       const d = document.createElement("div");
@@ -1038,6 +1041,35 @@ async function ask() {
     });
   } catch (e) { toast("提问失败: " + e.message); }
   finally { btn.disabled = false; btn.textContent = "提问"; }
+}
+
+/* ---------------------------------------------------------- 问答反馈 */
+/* 答案下方的三个反馈按钮：点一次就记一条，成功后整排置灰。 */
+function renderAskFeedback(requestId) {
+  const fb = $("#a-feedback");
+  if (!fb) return;
+  if (!requestId) { fb.classList.add("hidden"); return; }
+  fb.classList.remove("hidden");
+  fb.innerHTML = `
+    <span class="muted">这个答案怎么样？</span>
+    <button class="sm" data-rating="up">👍 有用</button>
+    <button class="sm" data-rating="down">👎 没用</button>
+    <button class="sm" data-rating="wrong_cite">引用不对</button>
+    <span id="a-fb-msg" class="muted"></span>`;
+  fb.querySelectorAll("button").forEach(b => {
+    b.addEventListener("click", async () => {
+      fb.querySelectorAll("button").forEach(x => x.disabled = true);
+      const msg = $("#a-fb-msg");
+      try {
+        await api(`/api/v1/query/${requestId}/feedback`,
+                  { method: "POST", body: { rating: b.dataset.rating } });
+        if (msg) msg.textContent = "已记录，谢谢";
+      } catch (e) {
+        if (msg) msg.textContent = "提交失败: " + e.message;
+        fb.querySelectorAll("button").forEach(x => x.disabled = false);
+      }
+    });
+  });
 }
 
 /* 问答引用卡片右键菜单：打开附件所在文件路径 / 查看 / 下载 / 复制路径 */
@@ -1106,7 +1138,7 @@ async function loadAdmin() {
   const body = $("#admin-body");
   body.innerHTML = '<p class="muted">加载中…</p>';
   // 普通用户没有管理员专属页签，落在这些页签上时回退到「API 密钥」
-  const adminOnlyTabs = ["users", "sources", "models"];
+  const adminOnlyTabs = ["users", "sources", "models", "traces"];
   if (state.role !== "admin" && adminOnlyTabs.includes(state.adminTab)) {
     state.adminTab = "tokens";
   }
@@ -1118,6 +1150,7 @@ async function loadAdmin() {
     if (state.adminTab === "sources") return KB.adminSources.render(body);
     if (state.adminTab === "models") return adminModels(body);
     if (state.adminTab === "restricted") return adminRestricted(body);
+    if (state.adminTab === "traces") return adminTraces(body);
   } catch (e) { body.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
 }
 
@@ -1805,6 +1838,60 @@ async function adminAudit(body) {
       <td>${esc((a.question || "").slice(0, 60))}</td><td class="muted">${esc(a.model_used || "")}</td>
       <td>${a.restricted ? '<span class="badge failed">涉密</span>' : ""}</td></tr>`).join("")}
     </tbody></table>`;
+}
+
+/* 检索轨迹（Task 0.3）：把"不准"变成看得见的。轨迹只存 chunk id / 分数 /
+   命中通道，问题只存哈希前 16 位——界面上也只显示这些，别把原文加回来。 */
+async function adminTraces(body) {
+  const r = await api("/api/v1/admin/traces?limit=50");
+  const routes = (t) => {
+    const s = t.route_stats || {};
+    return `<span class="muted">词${s.keyword ?? "-"}</span>
+      <span class="muted">矢${s.vector ?? "-"}</span>
+      <span class="muted">图${s.graph ?? "-"}</span>
+      <span class="muted">wiki${s.wiki ?? "-"}</span>`;
+  };
+  body.innerHTML = `
+    <table><thead><tr><th>时间</th><th>request_id</th><th>问题</th><th>各路召回</th><th>反馈</th><th></th></tr></thead><tbody>
+    ${(r.traces || []).map(t => `<tr>
+      <td class="muted">${fmtTime(t.created_at)}</td>
+      <td class="muted">${esc(t.request_id)}</td>
+      <td class="muted" title="红线：界面只显示问题哈希">${esc(t.question_hash || "")}</td>
+      <td>${routes(t)}</td>
+      <td>${t.feedback_rating
+        ? `<span class="badge ${t.feedback_rating === "up" ? "done" : "failed"}">${
+            t.feedback_rating === "up" ? "👍 有用" :
+            t.feedback_rating === "down" ? "👎 没用" : "引用不对"}</span>
+            ${t.feedback_comment ? `<div class="muted" style="font-size:12px">${esc(t.feedback_comment)}</div>` : ""}`
+        : '<span class="muted">-</span>'}</td>
+      <td><button class="sm" onclick="showTraceDetail('${esc(t.request_id)}')">详情</button></td></tr>`).join("")}
+    </tbody></table>
+    <p class="muted">轨迹记录每次问答的四路召回与融合名次（只含 chunk id 与分数，不含原文）。「没用 / 引用不对」集中的 request_id 就是检索优化的第一优先级。</p>`;
+}
+
+/* 轨迹详情：这次到底召回了什么、每路命中了哪些块、融合后排到第几 */
+async function showTraceDetail(requestId) {
+  let d;
+  try {
+    d = (await api(`/api/v1/admin/traces/${requestId}`)).trace;
+  } catch (e) { toast("加载轨迹失败: " + e.message); return; }
+  const ro = d.routes || {};
+  openModal(`<h3 style="margin:0 0 10px">检索轨迹 ${esc(requestId)}</h3>
+    <p class="muted" style="font-size:12px">问题哈希 ${esc(d.question_hash || "-")} ·
+      ${d.acl_filtered ? '<span class="badge failed">有候选被 ACL 过滤</span>'
+                       : '<span class="badge done">无 ACL 过滤</span>'}</p>
+    <div class="muted" style="font-size:12px">
+      keyword: ${(ro.keyword || []).join(", ") || "无"}<br>
+      vector: ${(ro.vector || []).join(", ") || "无"}<br>
+      graph: ${(ro.graph || []).join(", ") || "无"}<br>
+      wiki: ${(ro.wiki || []).join(", ") || "无"}
+    </div>
+    <table><thead><tr><th>名次</th><th>chunk_id</th><th>分数</th><th>命中通道</th></tr></thead><tbody>
+    ${(d.fused || []).map((c, i) => `<tr>
+      <td class="muted">${i + 1}</td><td>${c.chunk_id}</td>
+      <td class="muted">${Number(c.score).toFixed(5)}</td>
+      <td>${(c.routes || []).map(x => `<span class="tag">${esc(x)}</span>`).join("")}</td></tr>`).join("")}
+    </tbody></table>`);
 }
 
 /* ---------------------------------------------------------- 工具 */
