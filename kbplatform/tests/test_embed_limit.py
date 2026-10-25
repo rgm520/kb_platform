@@ -95,6 +95,70 @@ def test_embed_chunks_splits_oversized_chunk(monkeypatch):
     assert 1500 in lens, "应有把 6000 字符块切到 1500 字符后成功嵌入的一次调用"
 
 
+def test_embed_chunks_reports_real_reason_on_shape_failure(monkeypatch):
+    """返回条数不符时：警告必须说真实原因，不得断言"超出 token 上限"。"""
+    def fake_embed(texts, model="bge-m3", keep_alive="30m"):
+        return [_unit() for _ in texts][:-1]   # 每次都比请求少一条（形状不符）
+
+    monkeypatch.setattr(kb.llm, "embed", fake_embed)
+    texts = ["短文本测试之一", "短文本测试之二", "短文本测试之三"]
+
+    vectors, warnings = embedding.embed_chunks(texts, model="bge-m3")
+
+    assert len(vectors) == 3 and all(v is None for v in vectors), \
+        "形状不符同样是失败，位置必须显式为 None"
+    assert len(warnings) == 1
+    w = warnings[0]
+    assert "3 个分块向量化失败" in w, "失败数量要点出来"
+    assert "超出" not in w and "2048" not in w, \
+        "条数不符不该被说成超长输入"
+    assert "条数/形状不符" in w
+    assert "期望 1 条，得到 0 条" in w, "应写明期望与实际条数"
+
+
+def test_embed_chunks_reports_real_reason_on_transport_error(monkeypatch):
+    """连接/其它异常时：警告用中性文案并带原始错误，不断言未验证的原因。"""
+    def fake_embed(texts, model="bge-m3", keep_alive="30m"):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(kb.llm, "embed", fake_embed)
+    vectors, warnings = embedding.embed_chunks(["很短"], model="bge-m3")
+
+    assert vectors == [None]
+    assert len(warnings) == 1
+    w = warnings[0]
+    assert "1 个分块向量化失败" in w
+    assert "超出" not in w and "2048" not in w, \
+        "连接失败不该被说成超长输入"
+    assert "嵌入失败" in w
+    assert "OSError" in w and "connection refused" in w, \
+        "应带上异常类型与消息，方便追查"
+
+
+def test_embed_chunks_warning_uses_last_real_failure(monkeypatch):
+    """失败原因混杂时：不断言 token 上限，并引用最后一次真实失败。"""
+
+    def fake_embed(texts, model="bge-m3", keep_alive="30m"):
+        state["n"] += 1
+        if state["n"] <= 2:   # 先两次（整批 + 首条重试）表现为超长输入
+            raise RuntimeError("the input length exceeds the context length")
+        return [_unit() for _ in texts][:-1]   # 之后一律形状不符
+
+    state = {"n": 0}
+    monkeypatch.setattr(kb.llm, "embed", fake_embed)
+    texts = ["甲乙丙丁戊己庚辛壬癸一", "甲乙丙丁戊己庚辛壬癸二", "甲乙丙丁戊己庚辛壬癸三"]
+
+    vectors, warnings = embedding.embed_chunks(texts, model="bge-m3")
+
+    assert all(v is None for v in vectors)
+    assert len(warnings) == 1
+    w = warnings[0]
+    assert "超出" not in w and "2048" not in w, \
+        "混杂原因时不得断言单一原因（尽管出现过一次超长证据）"
+    assert "嵌入失败" in w
+    assert "期望 1 条，得到 0 条" in w, "警告里应引用最后一次真实失败"
+
+
 # ---------------------------------------------------------------- indexer.py
 
 def _setup(tmp_path, content):
