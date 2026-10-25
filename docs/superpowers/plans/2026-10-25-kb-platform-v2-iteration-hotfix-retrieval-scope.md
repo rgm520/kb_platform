@@ -40,7 +40,7 @@
 
 ---
 
-### Task 0.4+1: 抽出统一的可见范围谓词并让检索层用它
+### Task 1: 抽出统一的可见范围谓词并让检索层用它
 
 **Files:**
 - Modify: `kbplatform/scopes.py`（新增 `unified_predicate(conn, user_id, alias="c") -> tuple[str, list]`）
