@@ -161,6 +161,18 @@ async function loadStats() {
     const tabs = { all: s.total, done: bs.done || 0, pending: bs.pending || 0,
                    failed: bs.failed || 0, skipped: bs.skipped || 0 };
     for (const k in tabs) { const el = $("#tab-" + k); if (el) el.textContent = tabs[k]; }
+    // 扫描件批量排队 OCR 的入口
+    const ocrHint = $("#board-ocr");
+    if (ocrHint) {
+      const n = (s.skipped_reasons || []).filter(x => x.reason === "扫描件待 OCR")
+        .reduce((a, b) => a + (b.count || 0), 0);
+      ocrHint.classList.toggle("hidden", !n);
+      if (n) {
+        ocrHint.innerHTML = `有 <b>${n}</b> 个扫描件待 OCR（文件在 NAS 上，但 PDF 没有文字层）。
+          <button class="sm" onclick="reparseAllScanned()">排队 OCR 全部扫描件</button>
+          <span class="muted">约 136 秒/页，在后台队列里跑，不影响平台使用。</span>`;
+      }
+    }
     markDocFilter();
   } catch (e) { toast("统计加载失败: " + e.message); }
 }
@@ -1585,6 +1597,17 @@ window.copyText = async (txt) => {
     catch (e2) { toast("复制失败，请手动选中上面的文本"); }
     document.body.removeChild(ta);
   }
+};
+window.reparseAllScanned = async () => {
+  if (!confirm("把所有扫描件排进队列做 OCR？\n\n"
+             + "OCR 约 136 秒/页，单个文件最多 20 页 / 10 分钟；\n"
+             + "在后台队列里跑，期间平台照常可用。")) return;
+  try {
+    const r = await api("/api/v1/documents/reparse-batch", { method: "POST" });
+    toast(r.notice || `已排队 ${r.queued} 个`, 6000);
+    loadStats();
+    loadDocs();
+  } catch (e) { toast("排队失败: " + e.message, 5000); }
 };
 window.reparseDoc = async (id) => {
   if (!confirm("重新解析这个文档？\n\n扫描件需要做 OCR，约 136 秒/页；\n"

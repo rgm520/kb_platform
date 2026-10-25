@@ -818,6 +818,35 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
             "text": text,
         }
 
+    @app.post("/api/v1/documents/reparse-batch")
+    def api_document_reparse_batch(ctx=Depends(require_admin)):
+        """把「扫描件待 OCR」的文档批量排队重跑（后台队列里慢慢做）。
+
+        扫描件默认不自动 OCR（136 秒/页会堵住队列），这里由管理员统一点名，
+        排进 jobs 表由流水线后台执行，不阻塞 Web 服务。
+        """
+        from kbplatform.jobs import JobQueue
+        rows = conn.execute(
+            "SELECT id, path FROM catalog WHERE status='skipped' AND needs_ocr=1"
+        ).fetchall()
+        q = JobQueue(conn)
+        queued, missing = 0, 0
+        for r in rows:
+            if not os.path.exists(r["path"]):
+                missing += 1
+                continue
+            conn.execute(
+                "UPDATE catalog SET status='pending', status_detail=NULL, needs_ocr=1, "
+                "ocr_requested=1, tier1_done=0, tier2_done=0, updated_at=? WHERE id=?",
+                (time.time(), int(r["id"])))
+            q.enqueue("index", int(r["id"]), force=True)
+            queued += 1
+        conn.commit()
+        return {"ok": True, "queued": queued, "missing": missing,
+                "notice": f"已把 {queued} 个扫描件排进队列；OCR 约 136 秒/页，"
+                          f"在后台慢慢跑（单个文件最多 20 页 / 10 分钟），"
+                          f"期间可以继续用平台。进度看「文档看板」的解析状态。"}
+
     @app.post("/api/v1/documents/{catalog_id}/reparse")
     def api_document_reparse(catalog_id: int, ctx=Depends(actor)):
         """手动重新解析：失败/扫描件跳过的文档在这里重跑。
