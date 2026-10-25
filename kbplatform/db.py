@@ -331,6 +331,18 @@ def connect(db_path: str) -> sqlite3.Connection:
         conn.execute("PRAGMA journal_mode=WAL")
     except sqlite3.OperationalError:
         pass
+    # WAL 文件上限（256 MB）。必须在 journal_mode=WAL 之后设置才生效。
+    # 为什么需要：journal_size_limit 默认 0（不限制），而平台是常驻进程，
+    # uvicorn 每个线程一个长连接 —— 一旦 checkpoint 挨饿（被动 checkpoint
+    # 无法把 WAL 归零，只能继续往后追加），WAL 会无限堆大。实测 kb.db 2.25GB
+    # 时 kb.db-wal 已到 2.49GB，比主库还大。设上限后：checkpoint 完成/库关闭
+    # 时 WAL 文件会被截到上限以内，不再无限涨。
+    # 风险说明：上限只是"文件大小收缩"，不改变任何锁行为；被截掉的帧要是
+    # 还没 checkpoint 进主库，TRUNCATE 恢复时会先按 WAL 恢复 —— 不会丢数据。
+    try:
+        conn.execute("PRAGMA journal_size_limit=268435456")
+    except sqlite3.OperationalError:
+        pass
     return conn
 
 

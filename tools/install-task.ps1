@@ -27,13 +27,15 @@ param(
 
 $TaskName = "OpenCode-KB-Platform"
 $WatchName = "OpenCode-KB-Watchdog"
+$BackupName = "OpenCode-KB-Backup"
 $root = "D:\kb-platform"
 $logs = "$root\kb\logs"
 
 if ($Uninstall) {
   Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
   Unregister-ScheduledTask -TaskName $WatchName -Confirm:$false -ErrorAction SilentlyContinue
-  Write-Host "已删除计划任务 $TaskName / $WatchName" -ForegroundColor Yellow
+  Unregister-ScheduledTask -TaskName $BackupName -Confirm:$false -ErrorAction SilentlyContinue
+  Write-Host "已删除计划任务 $TaskName / $WatchName / $BackupName" -ForegroundColor Yellow
   exit 0
 }
 
@@ -159,6 +161,37 @@ try {
   Write-Host "（平台任务已就位，看门狗缺失只会影响自动拉起能力）" -ForegroundColor Yellow
 }
 Write-Host "已注册看门狗任务 $WatchName（每 1 分钟）" -ForegroundColor Green
+
+# ---------------------------------------------------------------- 每日备份
+# 每天 02:00 用 SQLite 备份 API 固化一份索引（kb.db + fts.db + vectors），
+# 保留最近 7 份。备份目录在本地盘 kb\backups，不会落进被监控的 NAS 根。
+# 失败重试 3 次：半夜 NAS/网络抖一下没理由放弃整晚的备份。
+$bAction = New-ScheduledTaskAction -Execute "powershell.exe" `
+  -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$root\tools\backup-db.ps1`"" `
+  -WorkingDirectory $root
+$bTrigger = New-ScheduledTaskTrigger -Daily -At 02:00
+$bSettings = New-ScheduledTaskSettingsSet `
+  -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable `
+  -MultipleInstances IgnoreNew `
+  -RestartCount 3 `
+  -RestartInterval (New-TimeSpan -Minutes 5) `
+  -ExecutionTimeLimit (New-TimeSpan -Hours 2)
+
+try {
+  if ($Mode -eq "Service") {
+    Register-ScheduledTask -TaskName $BackupName -Action $bAction -Trigger $bTrigger `
+      -Principal $principal -Settings $bSettings -User $user -Password $cred.GetNetworkCredential().Password `
+      -Description "企业知识平台每日备份：02:00 快照索引库，保留最近 7 份" -ErrorAction Stop | Out-Null
+  } else {
+    Register-ScheduledTask -TaskName $BackupName -Action $bAction -Trigger $bTrigger `
+      -Principal $principal -Settings $bSettings `
+      -Description "企业知识平台每日备份：02:00 快照索引库，保留最近 7 份" -ErrorAction Stop | Out-Null
+  }
+} catch {
+  Write-Host "备份任务注册失败: $($_.Exception.Message)" -ForegroundColor Red
+  Write-Host "（平台照常运行，可手工执行 $root\tools\backup-db.ps1 备份）" -ForegroundColor Yellow
+}
+Write-Host "已注册备份任务 $BackupName（每天 02:00，失败重试 3 次）" -ForegroundColor Green
 
 # ---------------------------------------------------------------- 后台可访问 NAS 验证
 if ($Mode -eq "Service" -and -not $SkipVerify) {

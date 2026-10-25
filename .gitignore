@@ -3,6 +3,7 @@ __pycache__/
 .pytest_cache/
 kb/data/
 kb/logs/
+kb/backups/
 _probe/
 *.db
 *.db-wal
