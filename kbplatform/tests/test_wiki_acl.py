@@ -22,7 +22,7 @@ from kbplatform.retrieval import Retriever
 from kbplatform.vectors import VectorStore
 
 SHARE = "信息化管理"
-ROOT = r"\\nas\信息化管理"
+ROOT = r"\\192.0.2.19\信息化管理"
 REL_IN = r"AI知识库\办法.md"      # 用户有权
 REL_OUT = r"保密\工资表.md"       # 用户无权
 
@@ -81,6 +81,54 @@ def test_wiki_candidate_hidden_outside_scope(tmp_path, monkeypatch):
         f"管理员应能召回该 wiki 候选：stats={stats_admin}"
 
 
+def test_wiki_hit_reaches_results_for_authorized_user(tmp_path, monkeypatch):
+    """有权用户必须能拿到**物化后的** wiki hit，而不是只有轨迹里的候选。
+
+    修复 off-by-one：候选 id 按 1_000_000 + wiki_pages.id（数据库主键）编码，
+    与 _wiki_meta 的「id IN (rid - 1_000_000)」解码自洽。管理员不受限，同权。
+    """
+    conn, r = _harness(tmp_path, monkeypatch, REL_IN)
+    wid = conn.execute("SELECT id FROM wiki_pages WHERE slug='w1'").fetchone()[0]
+    hits, stats = r.retrieve("服务器 验收", user_id=9)
+    wiki_hits = [h for h in hits if h.chunk_id >= 1_000_000]
+    assert wiki_hits, f"wiki 候选应物化成 hit（不得在 meta 解码时丢失）：hits={hits} stats={stats}"
+    h = wiki_hits[0]
+    assert h.chunk_id == 1_000_000 + wid, \
+        f"wiki id 必须按主键编码（1_000_000 + wiki_pages.id）：{h.chunk_id} vs {wid}"
+    assert h.text == "服务器 硬件 更换验收记录 修订版 有效地", \
+        f"hit 的正文必须是这条 wiki 页自己的（不得串行)：{h.text}"
+    assert h.file_path == ROOT + "\\" + REL_IN
+    assert h.locator == "wiki" and "wiki" in h.matched_by
+    assert stats["wiki"] == 1
+    # 管理员（不设限调用方）同样拿到同一个 hit
+    hits_admin, stats_admin = r.retrieve("服务器 验收", user_id=None)
+    wh_admin = [x for x in hits_admin if x.chunk_id >= 1_000_000]
+    assert wh_admin and wh_admin[0].chunk_id == h.chunk_id, \
+        f"管理员应召回同一个 wiki 候选：stats={stats_admin}"
+
+
+def test_wiki_meta_share_rel_resolved_from_catalog(tmp_path, monkeypatch):
+    """wiki hit 的 share/rel_path 必须与权限模型一致（catalog 行为权威来源）。
+
+    修复错位：原实现对 ``\\192.0.2.19\\信息化管理\\AI知识库\\x.md`` 手工
+    segs[2] 拆出 share="AI知识库"——既不是权限模型的 (share, rel_path) 语义。
+    """
+    conn, r = _harness(tmp_path, monkeypatch, REL_IN)
+    hits, _ = r.retrieve("服务器 验收", user_id=9)
+    h = next(x for x in hits if x.chunk_id >= 1_000_000)
+    assert h.share == SHARE, f"share 应是共享名「{SHARE}」：{h.share}"
+    assert h.rel_path == REL_IN, f"rel_path 应是共享内相对路径「{REL_IN}」：{h.rel_path}"
+
+
+def test_trace_flags_acl_when_wiki_candidates_dropped(tmp_path, monkeypatch):
+    """wiki 候选被可见性过滤掉时，轨迹要能看出"这一路被 ACL 压下去了"。"""
+    conn, r = _harness(tmp_path, monkeypatch, REL_OUT)
+    trace: dict = {}
+    hits, stats = r.retrieve("服务器 验收", user_id=9, trace=trace)
+    assert trace["acl_filtered"] is True, \
+        f"wiki 候选被 ACL 压掉应记录在轨迹里：trace={trace} stats={stats}"
+
+
 def test_wiki_candidate_visible_inside_scope(tmp_path, monkeypatch):
     """wiki 页挂在有权目录的源文件上：候选应保留在召回里（不得放宽）。"""
     conn, r = _harness(tmp_path, monkeypatch, REL_IN)
@@ -90,6 +138,9 @@ def test_wiki_candidate_visible_inside_scope(tmp_path, monkeypatch):
     route = trace["routes"]["wiki"]
     assert len(route) == 1 and route[0] >= 1_000_000, \
         f"轨迹里 wiki 通道应有恰好一个候选（id 段位 >= 1_000_000）：{route}"
+    assert stats["wiki"] == 1
+    assert trace["acl_filtered"] is False, \
+        f"有权候选被保留时不得误报 ACL 过滤：trace={trace}"
 
 
 def test_wiki_candidate_hidden_without_any_grant(tmp_path, monkeypatch):
@@ -114,3 +165,11 @@ def test_wiki_candidate_without_catalog_row_is_hidden(tmp_path, monkeypatch):
     _, stats_admin = r.retrieve("服务器 验收", user_id=None)
     assert stats_admin["wiki"] == 1, \
         f"管理员应能召回该 wiki 候选：stats={stats_admin}"
+    # 管理员能拿到这条 hit：没有 catalog 行，share/rel_path 由现成的
+    # split_share 兜底拆解（语义与权限模型一致）
+    hits_admin, _ = r.retrieve("服务器 验收", user_id=None)
+    wh = [x for x in hits_admin if x.chunk_id >= 1_000_000]
+    assert wh, f"管理员应拿到物化后的 wiki hit：{hits_admin}"
+    assert wh[0].share == SHARE, f"无 catalog 行时 share 应按 UNC 拆解：{wh[0].share}"
+    assert wh[0].rel_path == r"AI知识库\幽灵.md", \
+        f"无 catalog 行时 rel_path 应按 UNC 拆解：{wh[0].rel_path}"

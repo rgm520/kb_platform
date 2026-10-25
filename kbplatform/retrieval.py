@@ -18,6 +18,7 @@ import numpy as np
 import kb.llm as llm
 
 from kbplatform import fts
+from kbplatform.paths import split_share
 from kbplatform.scopes import (load_scopes, load_restricted, restricted_predicate,
                                unified_predicate)
 from kbplatform.vectors import VectorStore
@@ -137,20 +138,34 @@ class Retriever:
         return {(r[0], r[1]) for r in rows}
 
     def _wiki_ids_for(self, query: str, topk: int,
-                      allowed_paths: set[tuple[str, str]] | None = None) -> list[int]:
-        """wiki 人工校正层。wiki_pages 的 id 段位与 chunk id 不重叠（>= 1_000_000）。
+                      allowed_paths: set[tuple[str, str]] | None = None,
+                      acl_dropped: list[int] | None = None) -> list[int]:
+        """wiki 人工校正层。候选 id = 1_000_000 + wiki_pages.id（数据库主键）。
+
+        编码/解码两侧必须自洽：解码在 _wiki_meta（``id IN (rid - 1_000_000)``），
+        retrieve 里的分段判断（cid >= 1_000_000）不变量须保住——wiki_pages.id
+        从 1 起，编码后恒 >= 1_000_001。
+        2026-10-25 修复：原来按结果数组序号编码，解码侧却按主键查——第一个
+        候选永远查不到 meta（被查成 id=0），靠后的串行，1.8x 加权从未产生过
+        可用 hit（wiki 通道因此一直是"死"的）。
 
         ACL（§7.4.1，四路一个都不能少）：allowed_paths 非 None（普通用户）时，
         只保留源文件路径落在可见范围内的候选；path 在 catalog 里解析不到
         （share/rel_path 无法判定）的一律剔除——不得放宽。管理员（None）不受限。
         在嵌入之前过滤：范围外的候选连向量都不算，也不进 trace。
+
+        acl_dropped 是可选出参：被可见性过滤掉的候选条数（轨迹据此显性化
+        "这一路被权限压下去了"，与 k/v/g 三路同等待遇）。
         """
         rows = self.conn.execute(
             """SELECT w.id, w.title, w.body, c.share, c.rel_path
                FROM wiki_pages w LEFT JOIN catalog c ON c.path = w.path""").fetchall()
         if allowed_paths is not None:
+            before = len(rows)
             rows = [r for r in rows
                     if r[3] is not None and (r[3], r[4]) in allowed_paths]
+            if acl_dropped is not None:
+                acl_dropped.append(before - len(rows))
         if not rows:
             return []
         texts = [f"{r[1] or ''}\n{r[2] or ''}" for r in rows]
@@ -163,7 +178,7 @@ class Retriever:
         qv /= max(np.linalg.norm(qv), 1e-9)
         sims = M @ qv
         order = np.argsort(-sims)[:topk]
-        return [1_000_000 + int(i) for i in order if sims[i] > 0.30]
+        return [1_000_000 + int(rows[int(i)][0]) for i in order if sims[i] > 0.30]
 
     # ------------------------------------------------------------ 融合
     def retrieve(self, query: str, user_id: int | None = None,
@@ -181,7 +196,9 @@ class Retriever:
         allowed = self._allowed_chunk_ids(user_id)
         allowed_paths = self._allowed_paths(user_id) if use_wiki else None
         acl_filtered = False
-        wiki_ids = self._wiki_ids_for(query, 4, allowed_paths) if use_wiki else []
+        wiki_acl_dropped: list[int] = []
+        wiki_ids = (self._wiki_ids_for(query, 4, allowed_paths, wiki_acl_dropped)
+                    if use_wiki else [])
 
         if allowed is not None:
             # 记录有无被过滤掉的召回结果：轨迹里要能看出"是不是被权限压下去了"
@@ -189,6 +206,10 @@ class Retriever:
             k_ids = [i for i in k_ids if i in allowed]
             v_ids = [i for i in v_ids if i in allowed]
             acl_filtered = len(k_ids) < k_before or len(v_ids) < v_before
+        # wiki 候选被可见性过滤同样要在轨迹里显性化："是不是被权限压下去了"
+        # （放在 k/v 统计之后：上面是对 acl_filtered 的整体赋值，先置会被覆盖）
+        if wiki_acl_dropped and wiki_acl_dropped[0]:
+            acl_filtered = True
 
         ranked_lists = [k_ids, v_ids]
         g_ids: list[int] = []
@@ -263,19 +284,23 @@ class Retriever:
     def _wiki_meta(self, ids: list[int]) -> dict[int, dict]:
         if not ids:
             return {}
-        real = [i - 1_000_000 for i in ids]
+        real = [i - 1_000_000 for i in ids]       # 解码 = 1_000_000 + wiki_pages.id
         marks = ",".join("?" * len(real))
         rows = self.conn.execute(
-            f"SELECT id, title, body, path, node_id FROM wiki_pages WHERE id IN ({marks})",
-            real).fetchall()
+            f"""SELECT w.id, w.title, w.body, w.path, w.node_id, c.share, c.rel_path
+                FROM wiki_pages w LEFT JOIN catalog c ON c.path = w.path
+                WHERE w.id IN ({marks})""", real).fetchall()
         out = {}
         for r in rows:
             path = r[3] or ""
-            share, rel = ("", "")
-            if path:
-                segs = [s for s in path.replace("/", "\\").split("\\") if s]
-                if len(segs) >= 3:
-                    share, rel = segs[2], "\\".join(segs[3:])
+            # share/rel_path 以 catalog 行为权威（与 chunk_meta / 可见性判定同一来源）。
+            # 页没有 catalog 行（已下架/未扫描，管理员仍可见）时，才退回现成的
+            # UNC 拆解 split_share（此前手工 segs[2] 对
+            # \\192.0.2.19\信息化管理\AI知识库\x.md 会拆出 share="AI知识库"，错位）。
+            if r[5] is not None:
+                share, rel = r[5], r[6]
+            else:
+                share, rel = split_share(path)
             out[r[0] + 1_000_000] = {"title": r[1], "text": r[2] or "",
                                       "file_path": path, "share": share, "rel_path": rel}
         return out

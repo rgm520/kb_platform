@@ -57,7 +57,7 @@ def app(tmp_path, monkeypatch):
     monkeypatch.setattr("kbplatform.retrieval.Retriever._vector",
                         lambda self, query, topk: [])
     monkeypatch.setattr("kbplatform.retrieval.Retriever._wiki_ids_for",
-                        lambda self, query, topk, allowed_paths=None: [])
+                        lambda self, query, topk, allowed_paths=None, acl_dropped=None: [])
     cid = _seed_doc(a.state.conn)
     fts.upsert(a.state.cfg.fts_path, [(cid, DOC_TEXT)])
     yield a
