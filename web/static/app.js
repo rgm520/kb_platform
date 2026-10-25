@@ -8,6 +8,7 @@ const state = {
   filters: { status: "", share: "" },
   boardView: "docs", nonDocByExt: [],
   cy: null, models: [], adminTab: "users",
+  restrictedDirs: [],
   tokenUserFilter: null, tokenLabel: "", tokenCounts: {},
 };
 
@@ -1138,7 +1139,7 @@ async function loadAdmin() {
   const body = $("#admin-body");
   body.innerHTML = '<p class="muted">加载中…</p>';
   // 普通用户没有管理员专属页签，落在这些页签上时回退到「API 密钥」
-  const adminOnlyTabs = ["users", "sources", "models", "traces"];
+  const adminOnlyTabs = ["users", "sources", "models", "restricted", "traces"];
   if (state.role !== "admin" && adminOnlyTabs.includes(state.adminTab)) {
     state.adminTab = "tokens";
   }
@@ -1364,6 +1365,7 @@ window.tokenCount = (uid) => (state.tokenCounts && state.tokenCounts[uid]) || 0;
 
 async function adminRestricted(body) {
   const r = await api("/api/v1/admin/restricted");
+  state.restrictedDirs = r.dirs || [];
   body.innerHTML = `
     <div class="form-row">
       <label>共享<input id="dr-share" class="inline"></label>
@@ -1371,9 +1373,11 @@ async function adminRestricted(body) {
       <label>说明<input id="dr-label" class="inline"></label>
       <button class="primary" onclick="addRestricted()">标记为涉密</button>
     </div>
-    <table><thead><tr><th>共享</th><th>子目录</th><th>说明</th><th>状态</th></tr></thead><tbody>
-    ${r.dirs.map(d => `<tr><td>${esc(d.share)}</td><td>${esc(d.subpath || "(整共享)")}</td><td>${esc(d.label || "")}</td>
-      <td><span class="badge ${d.restricted ? "failed" : "skipped"}">${d.restricted ? "涉密" : "普通"}</span></td></tr>`).join("")}
+    <table><thead><tr><th>共享</th><th>子目录</th><th>说明</th><th>状态</th><th>操作</th></tr></thead><tbody>
+    ${state.restrictedDirs.map((d, i) => `<tr><td>${esc(d.share)}</td><td>${esc(d.subpath || "(整共享)")}</td><td>${esc(d.label || "")}</td>
+      <td><span class="badge ${d.restricted ? "failed" : "skipped"}">${d.restricted ? "涉密" : "普通"}</span></td>
+      <td>${d.restricted ? `<button class="sm" onclick="clearRestricted(${i})">取消标记</button>`
+                          : '<span class="muted">—</span>'}</td></tr>`).join("")}
     </tbody></table>
     <p class="muted">命中涉密目录的查询会自动锁定本地模型，且不向云端回传片段原文。</p>`;
 }
@@ -1383,6 +1387,17 @@ window.addRestricted = async () => {
       share: $("#dr-share").value.trim(), subpath: $("#dr-sub").value.trim(),
       restricted: true, label: $("#dr-label").value.trim() } });
     toast("已标记"); loadAdmin();
+  } catch (e) { toast("失败: " + e.message); }
+};
+window.clearRestricted = async (i) => {
+  // 取消标记 = 按既有 upsert 语义把 restricted 置 0（保留 share/subpath/label）
+  const d = state.restrictedDirs[i];
+  if (!d) return;
+  try {
+    await api("/api/v1/admin/restricted", { method: "PUT", body: {
+      share: d.share, subpath: d.subpath || "",
+      restricted: false, label: d.label || "" } });
+    toast("已取消标记"); loadAdmin();
   } catch (e) { toast("失败: " + e.message); }
 };
 

@@ -784,6 +784,19 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
                 uniq.append(e)
         return {"nodes": nodes_out, "edges": uniq}
 
+    def _mask_restricted_detail(user: dict, restricted: list, d: dict) -> None:
+        """status_detail 的涉密脱敏（结构性判断，不做字符串替换）。
+
+        用现成的涉密判定（scopes.is_restricted / load_restricted）判断该文档
+        是否命中涉密目录；命中就把整个 status_detail 换成固定文案「（涉密目录）」，
+        失败原因里的任何路径都不再出现，也不泄露是哪个涉密目录。
+        管理员不受影响；status_detail 缺失/为空时无需脱敏。
+        """
+        if not d.get("status_detail") or user.get("role") == "admin":
+            return
+        if is_restricted(restricted, d["share"], d["rel_path"]):
+            d["status_detail"] = "（涉密目录）"
+
     @app.get("/api/v1/documents")
     def api_documents(request: Request, status: Optional[str] = None,
                       share: Optional[str] = None, page: int = 1,
@@ -805,12 +818,13 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
             where.append("c.tier2_done=1")
         sql = f"SELECT c.* FROM catalog c WHERE {' AND '.join(where)} ORDER BY c.id LIMIT ? OFFSET ?"
         rows = conn.execute(sql, params + [page_size, (page - 1) * page_size]).fetchall()
+        # 失败原因对普通用户也可见了（spec C4：不再只让人看见"坏"）；
+        # 命中涉密目录的文档按记录做结构性脱敏，不借助失败原因泄露涉密路径
+        restricted = load_restricted(conn) if u["role"] != "admin" else []
         items = []
         for r in rows:
             d = dict(r)
-            # 失败详情仅管理员可见
-            if u["role"] != "admin":
-                d.pop("status_detail", None)
+            _mask_restricted_detail(u, restricted, d)
             items.append(d)
         total = conn.execute(
             f"SELECT COUNT(*) FROM catalog c WHERE {' AND '.join(where)}", params).fetchone()[0]
@@ -960,7 +974,12 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
 
     @app.get("/api/v1/documents/{catalog_id}")
     def api_document(catalog_id: int, ctx=Depends(actor)):
-        d = _get_catalog_row(catalog_id, ctx["user"])
+        u = ctx["user"]
+        d = _get_catalog_row(catalog_id, u)
+        # 列表接口已放开失败原因；详情接口保持同一规则：
+        # 普通用户命中涉密目录的文档同样脱敏，不能从详情弹窗绕过
+        if u["role"] != "admin":
+            _mask_restricted_detail(u, load_restricted(conn), d)
         kps = conn.execute(
             "SELECT summary, key_points FROM knowledge WHERE file_path=? ORDER BY chunk_id",
             (d["path"],)).fetchall()
