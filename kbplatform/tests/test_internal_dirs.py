@@ -1,8 +1,12 @@
 """平台内部目录 `_kb` 全链路清理的回归测试。
 
 任务 0.1：`_kb` / `_kb_trash` 是平台自己的产物目录（1.0 引擎的 wiki 导出、
-2.0 的回收站），不属于用户文件。它们必须：扫描器跳过、监控快照不预热、
-文件页对所有用户隐藏（管理员也一样）。
+2.0 的回收站），不属于用户文件。它们必须：所有扫描器跳过、监控快照不预热、
+文件页对所有用户隐藏（管理员也一样）、授权选择器不提供。
+
+真实路径是嵌套的 `AI知识库\\_kb\\wiki\\…`，所以这里的用例同时覆盖
+"源根下"与"嵌套在用户目录下"两种情形；名单只有一个来源
+`kbplatform.platform_dirs`（平台目录 / 通用忽略目录两个集合）。
 """
 from __future__ import annotations
 
@@ -37,21 +41,52 @@ def app(tmp_path):
 
 
 def test_is_platform_rel():
+    """平台目录名是保留名：无论在第几段，命中即视为平台目录。"""
     from kbplatform.platform_dirs import is_platform_rel
+    # 源根下的平台目录
     assert is_platform_rel("_kb\\wiki\\entities\\a.md") is True
     assert is_platform_rel("_kb_trash\\20261025\\x.pdf") is True
+    # 嵌在用户目录下面的真实 1.0 产物路径（只看第一段会漏）
+    assert is_platform_rel("AI知识库\\_kb\\wiki\\entities\\a.md") is True
+    assert is_platform_rel("AI知识库\\_kb_trash\\20261025\\x.pdf") is True
+    # 纯用户目录不受影响
     assert is_platform_rel("AI知识库\\正常目录\\a.pdf") is False
+    assert is_platform_rel("") is False
+
+
+def test_platform_dir_names_single_source():
+    """唯一来源约束：fsindex/catalog/nas/storage 的名单都从 platform_dirs 派生。"""
+    import kbplatform.catalog as catalog_mod
+    import kbplatform.fsindex as fsindex_mod
+    import kbplatform.nas as nas_mod
+    import kbplatform.storage as storage_mod
+    from kbplatform.platform_dirs import IGNORED_DIR_NAMES, PLATFORM_DIR_NAMES
+    for names in (fsindex_mod.SKIP_DIR_NAMES, catalog_mod.SKIP_DIR_NAMES,
+                  nas_mod.SKIP_DIRS, storage_mod.SKIP_NAMES):
+        assert _superset(names, PLATFORM_DIR_NAMES | IGNORED_DIR_NAMES), names
+    # 1.0 扫描器额外的开发工具垃圾目录不能丢（它们不属于平台目录）
+    assert {".git", "__pycache__", "node_modules"} <= catalog_mod.SKIP_DIR_NAMES
+
+
+def _superset(names, want):
+    got = {str(n).lower() for n in names}
+    return all(w.lower() in got for w in want)
 
 
 def test_scanner_skips_platform_dirs(tmp_path):
-    """含 `_kb/` 的存储源扫描后，fs_entries 里不该有 _kb 下的条目。"""
+    """`_kb`/`_kb_trash` 不管在不在源根，都不进索引；正常目录照常索引。"""
     from kbplatform.fsindex import scan_source
+    from kbplatform.platform_dirs import is_platform_rel
     from kbplatform.storage import LocalAdapter, source_from_row
     root = tmp_path / "src"
     (root / "_kb" / "wiki" / "entities").mkdir(parents=True)
     (root / "_kb" / "wiki" / "entities" / "a.md").write_bytes(b"x")
-    (root / "正常目录").mkdir()
-    (root / "正常目录" / "b.txt").write_bytes(b"x")
+    (root / "_kb_trash").mkdir()
+    (root / "_kb_trash" / "old.docx").write_bytes(b"x")
+    (root / "AI知识库" / "_kb" / "wiki" / "entities").mkdir(parents=True)
+    (root / "AI知识库" / "_kb" / "wiki" / "entities" / "a.md").write_bytes(b"x")
+    (root / "AI知识库" / "正常目录").mkdir()
+    (root / "AI知识库" / "正常目录" / "b.txt").write_bytes(b"x")
     conn = init_db(str(tmp_path / "kb.db"))
     conn.execute(
         "INSERT INTO storage_sources(name,kind,root,enabled,writable,created_at) "
@@ -63,8 +98,42 @@ def test_scanner_skips_platform_dirs(tmp_path):
     rels = [r["rel_path"] for r in conn.execute(
         "SELECT rel_path FROM fs_entries").fetchall()]
     assert rels, "索引不应为空"
-    assert not any(r.split("\\")[0] == "_kb" for r in rels), rels
-    assert "正常目录\\b.txt" in rels
+    assert not any(is_platform_rel(r) for r in rels), rels
+    assert "AI知识库\\正常目录\\b.txt" in rels
+
+
+def test_catalog_scanner_skips_nested_platform_dirs(tmp_path):
+    """1.0 scan_root：嵌套的 `_kb` / `_kb_trash` 也跳过（原来漏 `_kb_trash`）。"""
+    from kbplatform.catalog import scan_root
+    from kbplatform.platform_dirs import is_platform_rel
+    (tmp_path / "AI知识库" / "_kb" / "wiki" / "entities").mkdir(parents=True)
+    (tmp_path / "AI知识库" / "_kb" / "wiki" / "entities" / "a.md").write_bytes(b"x")
+    (tmp_path / "AI知识库" / "_kb_trash").mkdir(parents=True)
+    (tmp_path / "AI知识库" / "_kb_trash" / "old.md").write_bytes(b"x")
+    (tmp_path / "AI知识库" / "正常").mkdir(parents=True)
+    (tmp_path / "AI知识库" / "正常" / "b.md").write_bytes(b"x")
+    recs, stats = scan_root(str(tmp_path), {}, [], qps=1000)
+    assert stats == {}, "平台目录 / 忽略目录下的东西不该进任何统计"
+    names = [r.name for r in recs]
+    assert names == ["b.md"], names
+    assert all(not is_platform_rel(r.path) for r in recs)
+
+
+def test_adapter_hides_platform_dirs(tmp_path):
+    """适配器层：平台目录与系统目录都不出现在列目录结果里。"""
+    from kbplatform.storage import LocalAdapter
+    for name in ("_kb", "_kb_trash", "#recycle", "可见"):
+        (tmp_path / name).mkdir()
+    out = [e.name for e in LocalAdapter(str(tmp_path)).listdir("")]
+    assert out == ["可见"]
+
+
+def test_grant_selector_hides_platform_dirs(tmp_path):
+    """授权选择器只列出真实目录，平台目录 / 系统目录不提供。"""
+    from kbplatform.nas import list_subdirs
+    for name in ("_kb", "_kb_trash", "#recycle", "正常"):
+        (tmp_path / name).mkdir()
+    assert list_subdirs(str(tmp_path)) == ["正常"]
 
 
 def test_warm_snapshot_only_monitors_scoped_rows(tmp_path):
@@ -90,12 +159,14 @@ def test_warm_snapshot_only_monitors_scoped_rows(tmp_path):
 
 
 def test_fs_list_hides_platform_dirs(app, tmp_path):
-    """存储源下的 `_kb/` 目录不出现在文件页列表里（管理员分支同样过滤）。"""
+    """`_kb` 无论在源根还是嵌套在用户目录下，都不出现在文件页（管理员同样过滤）。"""
     share = tmp_path / "share"
     (share / "_kb" / "wiki" / "entities").mkdir(parents=True)
     (share / "_kb" / "wiki" / "entities" / "a.md").write_bytes(b"x")
-    (share / "可见目录").mkdir()
-    (share / "可见目录" / "b.txt").write_bytes(b"x")
+    (share / "AI知识库" / "_kb").mkdir(parents=True)
+    (share / "AI知识库" / "_kb" / "x.md").write_bytes(b"x")
+    (share / "AI知识库" / "正常目录").mkdir()
+    (share / "AI知识库" / "正常目录" / "b.txt").write_bytes(b"x")
     conn = app.state.conn
     conn.execute(
         "INSERT INTO storage_sources(name,kind,root,writable,enabled,created_at) "
@@ -106,7 +177,7 @@ def test_fs_list_hides_platform_dirs(app, tmp_path):
     c = TestClient(app)
     r = c.post("/api/v1/auth/login", json={"username": "admin", "password": "pw123456"})
     assert r.status_code == 200, r.text
-    body = c.get(f"/api/v1/fs/list?source_id={sid}&rel=").json()
-    names = [e["name"] for e in body["entries"]]
-    assert "_kb" not in names, names
-    assert "可见目录" in names
+    names = lambda rel: [e["name"] for e in
+                         c.get(f"/api/v1/fs/list?source_id={sid}&rel={rel}").json()["entries"]]
+    assert names("") == ["AI知识库"]
+    assert names("AI知识库") == ["正常目录"], "嵌套的 _kb 也要隐藏"

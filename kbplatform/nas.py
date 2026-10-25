@@ -11,10 +11,11 @@ import os
 import time
 
 from kbplatform.paths import norm_unc
+from kbplatform.platform_dirs import IGNORED_DIR_NAMES, PLATFORM_DIR_NAMES
 
-# 系统目录，不该出现在授权选择器里
-SKIP_DIRS = {"#recycle", "#snapshot", "@eaDir", "$RECYCLE.BIN",
-             "System Volume Information", "_kb"}
+# 授权选择器不展示的目录：平台内部目录（唯一名单，含重建后的 _kb_trash）
+# + 系统回收目录，都从 platform_dirs 派生。
+SKIP_DIRS = PLATFORM_DIR_NAMES | IGNORED_DIR_NAMES
 
 
 def share_roots(drive_map: dict[str, str], order: list[str] | None = None) -> list[tuple[str, str]]:

@@ -32,33 +32,30 @@ import sqlite3
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from kbplatform.paths import norm_unc
-from kbplatform.platform_dirs import PLATFORM_DIR_NAMES
+# 名单已经统一：哪里需要"路径含平台内部目录"的判断，都复用
+# kbplatform.platform_dirs.is_platform_rel（任一路径段命中即真），
+# 不在这里再写一份匹配逻辑。
+from kbplatform.platform_dirs import is_platform_rel
 
 _ORDER = ("catalog", "fs_entries", "fs_fts", "jobs", "catalog_stats")
 
 
-def _has_platform_dir(path: str) -> bool:
-    """路径中任一段等于平台内部目录名（忽略大小写与分隔符形式）。
-
-    为什么按"段"匹配而不是 LIKE '%_kb\\%'：
-      SQLite 的 LIKE 里反斜杠并不是转义符，`%` 永远是通配符；而且
-      子串匹配会误伤 ``文档_kb\\`` 这类用户自己的目录。按段相等才能
-      又删得全（catalog 存的是 ``…\\AI知识库\\_kb\\wiki\\…`` 这样的中段）、
-      又删得准（fs_entries 的段判断复用同一份名单，不在脚本里另写字面量）。
-    """
-    names = {n.lower() for n in PLATFORM_DIR_NAMES}
-    return any(seg.lower() in names for seg in norm_unc(path).split("\\"))
-
-
 def _collect(conn: sqlite3.Connection) -> dict[str, list]:
-    """选出所有要删的行（纯 SELECT，不修改任何数据）。"""
+    """选出所有要删的行（纯 SELECT，不修改任何数据）。
+
+    匹配用 is_platform_rel（任意路径段 == `_kb`/`_kb_trash`）：
+      1. catalog 存 UNC 全路径，`_kb` 藏在 ``…\\AI知识库\\_kb\\wiki\\…`` 中段，
+         按段相等才能又删得全、又不会误伤 ``文档_kb\\`` 这类用户目录
+         （SQLite 的 LIKE 里 `%` 永远是通配符，反斜杠也不是转义符，
+         子串匹配两头都做不到）；
+      2. fs_entries / catalog_stats 同一函数、同一份名单，与扫描器一致。
+    """
     all_cat = conn.execute("SELECT id, path FROM catalog").fetchall()
-    cat_ids = [rid for rid, path in all_cat if _has_platform_dir(path)]
+    cat_ids = [rid for rid, path in all_cat if is_platform_rel(path)]
     surviving = {rid for rid, _ in all_cat} - set(cat_ids)
 
     fe_ids = [rid for rid, rel in conn.execute("SELECT id, rel_path FROM fs_entries")
-              if _has_platform_dir(rel)]
+              if is_platform_rel(rel)]
     fts_ids = []
     if fe_ids:
         ph = ",".join("?" * len(fe_ids))
@@ -71,7 +68,7 @@ def _collect(conn: sqlite3.Connection) -> dict[str, list]:
         if cid not in surviving]
 
     stat_rows = [(share, ext) for share, ext in conn.execute(
-        "SELECT share, ext FROM catalog_stats") if _has_platform_dir(share)]
+        "SELECT share, ext FROM catalog_stats") if is_platform_rel(share)]
     return {"catalog": cat_ids, "fs_entries": fe_ids, "fs_fts": fts_ids,
             "jobs": job_ids, "catalog_stats": stat_rows}
 

@@ -20,10 +20,13 @@ from typing import BinaryIO, Iterator
 
 import smbclient
 
-SKIP_NAMES = {"_kb_trash", "#recycle", "#snapshot", "@eaDir", "$RECYCLE.BIN",
-              "System Volume Information",
-              # Windows 资源管理器默认不显示的系统文件
-              "Thumbs.db", "thumbs.db", "desktop.ini", "Desktop.ini"}
+from kbplatform.platform_dirs import IGNORED_DIR_NAMES, PLATFORM_DIR_NAMES
+
+# 适配器层列目录时隐藏的名字：目录类用 platform_dirs 的两个唯一来源集合
+# 合并；Thumbs.db/desktop.ini 等是 Windows 默认不显示的**文件**（不是目录，
+# 与"平台目录 / 忽略目录"不是一个语义），留在本适配器名单里。
+SKIP_NAMES = (PLATFORM_DIR_NAMES | IGNORED_DIR_NAMES |
+              {"Thumbs.db", "thumbs.db", "desktop.ini", "Desktop.ini"})
 
 _DRIVE_RE = re.compile(r"^[A-Za-z]:")
 _BAD_CHARS = set('*?"<>|:')

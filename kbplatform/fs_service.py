@@ -384,7 +384,8 @@ def register_fs_routes(app, cfg: Config, conn, require_user, require_admin, audi
             else:
                 raise HTTPException(404, detail=f"目录不可读: {e}")
         entries = filter_entries(gs, source.id, rel, entries) if not _is_admin(user) else list(entries)
-        # 平台内部目录（_kb / _kb_trash）不展示给任何人，对管理员也一样
+        # 平台内部目录（_kb / _kb_trash，是保留名，任意路径段命中即隐藏）
+        # 不展示给任何人，对管理员也一样；与扫描器 / 清理脚本同一份名单。
         entries = [e for e in entries if not is_platform_rel(e.rel)]
 
         # 授权路径比真实目录更深时，补出「下一段」导航占位

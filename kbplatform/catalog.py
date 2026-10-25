@@ -10,15 +10,16 @@ import time
 from dataclasses import dataclass
 
 from kbplatform.paths import to_unc, split_share
+from kbplatform.platform_dirs import IGNORED_DIR_NAMES, PLATFORM_DIR_NAMES
 
 PARSEABLE_EXT = {".pdf", ".docx", ".xlsx", ".xlsm", ".pptx",
-                  ".doc", ".xls", ".txt", ".md", ".ofd"}
+                 ".doc", ".xls", ".txt", ".md", ".ofd"}
 
-# 平台自身的产物目录不能进 catalog（否则会自我吞噬）
-SKIP_DIR_NAMES = {
-    "#recycle", "#snapshot", "@eaDir", "$RECYCLE.BIN", "System Volume Information",
-    "_kb", ".git", "__pycache__", "node_modules",
-}
+# 扫描根目录时跳过的目录 = 平台内部目录 + 系统回收目录（platform_dirs
+# 唯一来源派生，这里不要写 `_kb` / `_kb_trash` 字面量）+ 开发者环境的
+# 垃圾目录。后一类与"平台目录"不是同一语义，只在本扫描器里跳过。
+SKIP_DIR_NAMES = (PLATFORM_DIR_NAMES | IGNORED_DIR_NAMES |
+                  {".git", "__pycache__", "node_modules"})
 
 
 @dataclass
