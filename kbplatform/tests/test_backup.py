@@ -10,7 +10,9 @@ import os
 import sqlite3
 from datetime import datetime, timedelta
 
-from kbplatform.backup import backup_db, prune_old
+import pytest
+
+from kbplatform.backup import backup_all, backup_db, prune_old
 from kbplatform.db import connect, init_db
 
 
@@ -123,3 +125,129 @@ def test_prune_old_keeps_newest(tmp_path):
     t2 = (now - timedelta(minutes=10)).strftime("%Y%m%d-%H%M")
     t1 = (now - timedelta(minutes=20)).strftime("%Y%m%d-%H%M")
     assert left == [f"kb-{t1}.db", f"kb-{t2}.db"]
+
+
+# ---------------------------------------------------------------- 修复一轮
+
+class _Cfg:
+    """backup_all 需要的最小 Config（不拉真实 config.toml，全部落在 tmp_path）。"""
+
+    def __init__(self, tmp):
+        self.data_dir = str(tmp / "data")
+        self.db_path = str(tmp / "data" / "kb.db")
+        self.fts_path = str(tmp / "data" / "fts.db")
+        self.vector_dir = str(tmp / "data" / "vectors")
+
+
+def _seed_chunk(db_path: str, text: str) -> None:
+    """另开一个连接插入 chunk（模拟流水线在备份窗口里写入）。"""
+    c = sqlite3.connect(db_path)
+    try:
+        c.execute("INSERT INTO chunks(file_path, chunk_idx, text) "
+                  "VALUES ('doc.pdf', 99, ?)", (text,))
+        c.commit()
+    finally:
+        c.close()
+
+
+def _prepare_env(tmp_path):
+    """init_db 一份带 chunks 的库 + 一个向量目录，返回 (cfg, dest)。"""
+    cfg = _Cfg(tmp_path)
+    conn = init_db(cfg.db_path)
+    conn.execute("INSERT INTO chunks(file_path, chunk_idx, text) "
+                 "VALUES ('old.pdf', 0, 'x')")
+    conn.commit()
+    conn.close()
+    # 空的 fts.db（真正的 fts 库也是 SQLite，快照 API 处理方式一致）
+    sqlite3.connect(cfg.fts_path).close()
+    os.makedirs(cfg.vector_dir, exist_ok=True)
+    with open(os.path.join(cfg.vector_dir, "vectors.f16"), "wb") as f:
+        f.write(b"\x00" * 8)
+    with open(os.path.join(cfg.vector_dir, "vectors.ids.json"), "wb") as f:
+        f.write(b"[1]")
+    dest = tmp_path / "backups"
+    dest.mkdir()
+    return cfg, str(dest)
+
+
+def test_backup_one_failure_leaves_no_half_file(tmp_path):
+    """快照中途失败 → 目标目录里不能留下半截文件（会被当有效备份）。"""
+    from kbplatform.backup import _backup_one
+    bad = sqlite3.connect(str(tmp_path / "src.db"))
+    bad.close()   # 关闭后的连接一调 backup 就抛 ProgrammingError（确定性失败）
+    dest = tmp_path / "backups"
+    dest.mkdir()
+    with pytest.raises(sqlite3.ProgrammingError):
+        _backup_one(bad, str(dest / "kb-fail.db"))
+    assert os.listdir(dest) == [], "失败的目标文件必须被清掉"
+
+
+def test_backup_all_retries_until_self_consistent(tmp_path, monkeypatch):
+    """备份窗口里流水线写入新 chunk → 第 1 轮作废、第 2 轮成功。
+
+    打桩 _backup_one 在第一轮 kb 快照**之前**往源库塞一行 chunk，
+    模拟"kb.db 快照和向量复制之间库还在变"——第 1 轮指纹必变、整组
+    作废重来；第 2 轮不再塞行，指纹一致 → 成功且产物齐全。
+    """
+    import kbplatform.backup as bk
+    cfg, dest = _prepare_env(tmp_path)
+
+    orig = bk._backup_one
+    state = {"kb_calls": 0}
+
+    def fake_backup_one(src, dest_path):
+        base = os.path.basename(dest_path)
+        if base.startswith("kb-"):
+            state["kb_calls"] += 1
+            if state["kb_calls"] == 1:
+                _seed_chunk(cfg.db_path, "written-in-window")
+        return orig(src, dest_path)
+
+    monkeypatch.setattr(bk, "_backup_one", fake_backup_one)
+
+    out = bk.backup_all(cfg, dest, keep=3)
+
+    names = {os.path.basename(p) for p in out}
+    assert any(n.startswith("kb-") for n in names)
+    assert any(n.startswith("fts-") for n in names)
+    assert any(n.startswith("vectors-") and n.endswith(".f16") for n in names)
+    assert any(n.startswith("vectors-") and n.endswith(".ids.json") for n in names)
+    assert state["kb_calls"] == 2, "第 1 轮作废后应重照一轮"
+    on_disk = [f for f in os.listdir(dest) if f.startswith("kb-")]
+    assert len(on_disk) == 1, "作废的那轮不能留文件"
+    # 最终快照里必须含窗口期间写入的 chunk（自洽：与向量同刻）
+    kb_file = [f for f in os.listdir(dest) if f.startswith("kb-")][0]
+    snap = sqlite3.connect(os.path.join(dest, kb_file))
+    try:
+        assert snap.execute("SELECT count(*) FROM chunks").fetchone()[0] == 2
+    finally:
+        snap.close()
+
+
+def test_backup_all_fails_loudly_when_source_keeps_changing(tmp_path, monkeypatch):
+    """源库每轮都在变 → 明确失败，目录里不留半截恢复集。
+
+    宁可今晚没有备份，也不要一个"看着完整、实际错位"的恢复集。
+    """
+    import kbplatform.backup as bk
+    cfg, dest = _prepare_env(tmp_path)
+
+    orig = bk._backup_one
+    state = {"kb_calls": 0}
+
+    def fake_backup_one(src, dest_path):
+        base = os.path.basename(dest_path)
+        if base.startswith("kb-"):
+            state["kb_calls"] += 1
+            _seed_chunk(cfg.db_path, f"still-growing-{state['kb_calls']}")
+        return orig(src, dest_path)
+
+    monkeypatch.setattr(bk, "_backup_one", fake_backup_one)
+
+    with pytest.raises(RuntimeError, match="chunks"):
+        bk.backup_all(cfg, dest, keep=3)
+
+    assert not any(f.startswith("kb-") or f.startswith("fts-")
+                   or f.startswith("vectors-")
+                   for f in os.listdir(dest)), "失败的恢复集必须整组作废"
+    assert state["kb_calls"] == bk._MAX_TRIES

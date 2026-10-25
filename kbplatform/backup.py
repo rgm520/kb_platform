@@ -37,17 +37,31 @@ _BACKUP_NAME_RE = re.compile(r"^(kb|fts|vectors)-(\d{8}-\d{4})\.(db|f16|ids\.jso
 
 
 def _backup_one(src: sqlite3.Connection, dest_path: str) -> str:
-    """用 SQLite 备份 API 把 src 完整快照到 dest_path（覆盖同名旧文件）。"""
+    """用 SQLite 备份 API 把 src 完整快照到 dest_path（覆盖同名旧文件）。
+
+    失败时必须删掉目标半截文件：备份 API 中途挂掉的产物不是完整快照，
+    留在盘上会被 prune_old 当成一份"有效"备份，恢复时直接坑。
+    """
     if os.path.exists(dest_path):
         # 覆盖旧文件：backup API 对已有库是整库重写，但先删掉更干净，
         # 也避免撞上损坏的残文件。
         os.remove(dest_path)
-    dst = sqlite3.connect(dest_path)
+    ok = False
     try:
-        src.backup(dst)
+        dst = sqlite3.connect(dest_path)
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+        ok = True
+        return dest_path
     finally:
-        dst.close()
-    return dest_path
+        if not ok and os.path.exists(dest_path):
+            try:
+                os.remove(dest_path)
+            except OSError as e:
+                print(f"[backup] 清理失败的半截快照失败 {dest_path}: {e}",
+                      flush=True)
 
 
 def prune_old(dest_dir: str, keep: int = 7, prefix: str = "kb") -> list[str]:
@@ -126,42 +140,97 @@ def _copy_vectors(cfg, ts: str, dest_dir: str) -> list[str]:
                        "请停摄入后重试")
 
 
+_MAX_TRIES = 3   # 源库还在变就整组重来的次数上限
+
+
+def _chunk_fingerprint(conn: sqlite3.Connection) -> tuple[int, int] | None:
+    """chunks 表的廉价指纹（行数, max(id)），跨产物对齐用。
+
+    kb.db 快照 → fts 快照 → 向量复制是顺序走的，窗口里流水线若写入了
+    新 chunk，恢复集就是"旧 kb.db + 新向量"——ids.json 里出现恢复后
+    库里根本不存在的 chunk id，而向量库是纯追加无 id 去重（vectors.py），
+    同一个 id 会对应两条候选，检索静默错位。所以复制完必须回头看：
+    指纹没变才算一个自洽的恢复集。chunks 表不存在时返回 None（没有可
+    错位的东西，视为一致）。
+    """
+    try:
+        row = conn.execute("SELECT count(*), max(id) FROM chunks").fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return (row[0] or 0, row[1] or 0)
+
+
+def _snapshot_group(cfg, src: sqlite3.Connection, ts: str,
+                    dest_dir: str) -> list[str]:
+    """一轮快照：kb.db → fts.db（backup API）→ vectors（成对稳定复制）。"""
+    paths: list[str] = []
+    # 1) 主库快照（src 由调用方持有并最后统一关闭）
+    paths.append(_backup_one(src, os.path.join(dest_dir, f"kb-{ts}.db")))
+
+    # 2) FTS 库同属 SQLite，也走备份 API
+    if os.path.exists(cfg.fts_path):
+        fts_src = sqlite3.connect(cfg.fts_path, timeout=30)
+        try:
+            paths.append(_backup_one(fts_src, os.path.join(dest_dir,
+                                                           f"fts-{ts}.db")))
+        finally:
+            fts_src.close()
+
+    # 3) 向量文件（要求 f16 / ids 成对来自同一时刻）
+    paths.extend(_copy_vectors(cfg, ts, dest_dir))
+    return paths
+
+
+def _discard_group(paths: list[str]) -> None:
+    """整组作废：恢复集要么三样都同一时刻，要么一个不留。"""
+    for p in paths:
+        try:
+            os.remove(p)
+        except OSError as e:
+            print(f"[backup] 清理作废备份文件失败 {p}: {e}", flush=True)
+
+
 def backup_all(cfg, dest_dir: str, keep: int = 7) -> list[str]:
     """完整备份一次：kb.db + fts.db（backup API）+ vectors（文件复制）。
 
     返回全部保留的备份文件路径。三种产物共享同一个时间戳，恢复时配对使用。
     主库 → FTS → 向量文件顺序固定：向量行序对应 kb.db 里的 chunk_id，
     必须等两个库快照落袋后再复制；fts.db 与 kb.db 同属一次 run 的状态。
+    顺序执行有窗口：若窗口里流水线写入了新 chunk，"旧 kb.db + 新向量"
+    是静默检索损坏。因此每轮快照前后各取一次 chunks 指纹（行数/max(id)），
+    变了就整组作废重来，最多 _MAX_TRIES 轮；仍不行就明确失败——
+    宁可今晚没有备份，也不留下一个"看着完整、实际错位"的恢复集。
     """
     from kbplatform.db import connect
 
     os.makedirs(dest_dir, exist_ok=True)
     ts = datetime.now().strftime(_TS_FMT)
-    out: list[str] = []
 
-    # 1) 主库：现有 connect() 只设置连接 pragma，不做业务写入
+    # 源库连接只开一次：现有 connect() 只设置连接 pragma，不做业务写入
     src = connect(cfg.db_path)
     try:
-        out.append(_backup_one(src, os.path.join(dest_dir, f"kb-{ts}.db")))
+        for attempt in range(1, _MAX_TRIES + 1):
+            fp_before = _chunk_fingerprint(src)
+            paths = _snapshot_group(cfg, src, ts, dest_dir)
+            fp_after = _chunk_fingerprint(src)
+            if fp_before == fp_after:
+                break            # 恢复集自洽，进入修剪
+            # 库在备份窗口里还在变：整组作废，重照一份
+            _discard_group(paths)
+            if attempt == _MAX_TRIES:
+                raise RuntimeError(
+                    f"备份窗口内 chunks 持续变化（指纹 {fp_before} -> {fp_after}），"
+                    f"{_MAX_TRIES} 轮都没拿到自洽恢复集；请停摄入后重试")
+            print(f"[backup] 恢复集不自洽（指纹 {fp_before} -> {fp_after}），"
+                  f"第 {attempt}/{_MAX_TRIES} 轮作废重来", flush=True)
     finally:
         src.close()
-
-    # 2) FTS 库同属 SQLite，也走备份 API
-    if os.path.exists(cfg.fts_path):
-        fts_src = sqlite3.connect(cfg.fts_path, timeout=30)
-        try:
-            out.append(_backup_one(fts_src, os.path.join(dest_dir, f"fts-{ts}.db")))
-        finally:
-            fts_src.close()
-
-    # 3) 向量文件（要求 f16 / ids 成对来自同一时刻）
-    out.extend(_copy_vectors(cfg, ts, dest_dir))
 
     # 4) 逐前缀清旧份，只保留本次产物与最近 keep 份
     kept: set[str] = set()
     for prefix in ("kb", "fts", "vectors"):
         kept.update(prune_old(dest_dir, keep=keep, prefix=prefix))
-    return [p for p in out if p in kept]
+    return sorted(kept)
 
 
 def _default_dest(cfg) -> str:
