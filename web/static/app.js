@@ -7,7 +7,7 @@ const state = {
   docs: { page: 1, size: 50, total: 0 },
   filters: { status: "", share: "" },
   boardView: "docs", nonDocByExt: [],
-  cy: null, models: [], adminTab: "users",
+  cy: null, models: [], adminTab: "users", captchaId: null,
   restrictedDirs: [],
   tokenUserFilter: null, tokenLabel: "", tokenCounts: {},
   // 建号表单的草稿：面板每次重渲染都会重建 DOM，不存草稿的话，
@@ -27,20 +27,75 @@ async function api(path, opts) {
   opts = opts || {};
   const init = { method: opts.method || "GET", headers: {} };
   if (opts.body !== undefined) {
-    init.headers["Content-Type"] = "application/json";
-    init.body = JSON.stringify(opts.body);
+    // FormData 不能自己设 Content-Type（边界要由浏览器生成）
+    if (typeof FormData !== "undefined" && opts.body instanceof FormData) {
+      init.body = opts.body;
+    } else {
+      init.headers["Content-Type"] = "application/json";
+      init.body = JSON.stringify(opts.body);
+    }
   }
   const r = await fetch(path, init);
-  if (r.status === 401) { showLogin(); throw new Error("未登录"); }
   const txt = await r.text();
   let data = null;
   try { data = txt ? JSON.parse(txt) : null; } catch (e) { data = { detail: txt }; }
   if (!r.ok) {
     const d = data && data.detail;
-    throw new Error(typeof d === "string" ? d : JSON.stringify(d || ("HTTP " + r.status)));
+    const msg = (typeof d === "string" ? d : (d && d.message) || JSON.stringify(d || ("HTTP " + r.status)));
+    const err = new Error(msg);
+    // 结构化 detail（如"要验证码了"）挂到 err.detail 上，调用方自己判断
+    if (d && typeof d === "object") err.detail = d;
+    if (r.status === 401) {
+      showLogin();
+      // 登录接口的 401 是"用户名或密码错误"，别被当成"未登录"覆盖掉
+      if (!err.detail) err.message = msg;
+    }
+    throw err;
   }
   return data;
 }
+
+/* ---------------------------------------------------------- 登录验证码 */
+/** 取一张验证码（服务端生成，答案只在服务端）。 */
+async function fetchCaptcha() {
+  const u = ($("#login-user") || {}).value || "";
+  try {
+    const r = await api("/api/v1/auth/captcha?username=" + encodeURIComponent(u));
+    if (!r || !r.required) { hideCaptcha(); return null; }
+    state.captchaId = r.captcha_id || null;
+    const img = $("#login-captcha-img"), prompt = $("#login-captcha-prompt");
+    if (r.image) {
+      img.src = r.image; img.hidden = false;
+      if (prompt) prompt.hidden = true;
+    } else {
+      // 降级：没有 Pillow 时是算术题
+      img.hidden = true; img.removeAttribute("src");
+      if (prompt) { prompt.textContent = r.prompt || ""; prompt.hidden = false; }
+    }
+    return r;
+  } catch (e) { return null; }
+}
+function showCaptcha() {
+  const row = $("#login-captcha-row");
+  if (row) row.classList.remove("hidden");
+  const inp = $("#login-captcha");
+  if (inp) { inp.value = ""; inp.focus(); }
+  fetchCaptcha();
+}
+function hideCaptcha() {
+  const row = $("#login-captcha-row");
+  if (row) row.classList.add("hidden");
+  const inp = $("#login-captcha");
+  if (inp) inp.value = "";
+  state.captchaId = null;
+}
+document.addEventListener("click", (e) => {
+  if (e.target && e.target.id === "login-captcha-img") fetchCaptcha();
+});
+$("#login-user").addEventListener("blur", () => {
+  // 换用户名后，之前那张验证码不再适用
+  if (state.captchaId) fetchCaptcha();
+});
 
 /* ---------------------------------------------------------- 登录 */
 /* 换用户时必须清空"上一个用户的数据"所在容器。
@@ -111,7 +166,8 @@ function showMain(user) {
   // 管理台默认页签：管理员进「用户与权限」，普通用户进「API 密钥」
   setAdminTab(user.role === "admin" ? "users" : "tokens");
   loadModels();
-  if (!location.hash || location.hash === "#/board") location.hash = "#/desktop";
+  // 会话恢复（刷新/书签）：只补默认 hash，不改写用户当前所在的页面
+  if (!location.hash) location.hash = "#/desktop";
   route();
 }
 function setAdminTab(tab) {
@@ -124,13 +180,30 @@ $("#login-form").addEventListener("submit", async (e) => {
   try {
     const r = await api("/api/v1/auth/login", {
       method: "POST",
-      body: { username: $("#login-user").value, password: $("#login-pass").value },
+      body: {
+        username: $("#login-user").value, password: $("#login-pass").value,
+        captcha_id: state.captchaId || null,
+        captcha_code: ($("#login-captcha") || {}).value || null,
+      },
     });
+    state.captchaId = null;
+    hideCaptcha();
+    // 登录后统一进功能菜单（桌面图标页），不管登录前停在哪个页面
+    location.hash = "#/desktop";
     showMain(r.user);
-  } catch (err) { $("#login-err").textContent = err.message; }
+  } catch (err) {
+    // 连续失败多次 → 服务端会要求验证码，这时把验证码行亮出来
+    if (err && err.detail && err.detail.captcha_required) {
+      showCaptcha();
+      $("#login-err").textContent = err.detail.message || "请输入验证码";
+    } else {
+      $("#login-err").textContent = err.message;
+    }
+  }
 });
 $("#logout").addEventListener("click", async () => {
   try { await api("/api/v1/auth/logout", { method: "POST" }); } catch (e) { }
+  hideCaptcha();
   showLogin();
 });
 
@@ -182,6 +255,103 @@ window.doChangePwd = async () => {
     closeModal();
     toast("密码已修改，下次登录请用新密码");
   } catch (e) { err.textContent = e.message; }
+};
+
+/* ---------------------------------------------------------- 品牌（名称/logo） */
+/** 拉一次品牌配置：登录页与顶栏都用它（登录前就要能显示）。 */
+async function loadBranding() {
+  let b = null;
+  try { b = await api("/api/v1/branding"); } catch (e) { return null; }
+  applyBranding(b);
+  return b;
+}
+function applyBranding(b) {
+  if (!b) return;
+  const name = b.system_name || "企业知识平台";
+  const t = $("#login-title"), br = $("#brand-name");
+  if (t) t.textContent = name;
+  if (br) br.textContent = name;
+  document.title = name;
+  const img = $("#login-logo"), mark = $("#login-logo-mark"), txt = $("#login-logo-text");
+  if (img && mark) {
+    if (b.has_logo) {
+      img.src = "/api/v1/branding/logo?t=" + Date.now();
+      img.hidden = false;
+      if (txt) txt.hidden = true;
+      mark.classList.add("has-image");
+    } else {
+      img.hidden = true;
+      img.removeAttribute("src");
+      if (txt) txt.hidden = false;
+      mark.classList.remove("has-image");
+    }
+  }
+}
+/** 管理台「系统设置」：改系统名称、传/删 logo。 */
+async function adminBranding(body) {
+  const b = await api("/api/v1/admin/branding");
+  const esc = (s) => String(s === null || s === undefined ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  body.innerHTML = `
+    <div class="page-head">
+      <div><h3 style="margin:0">系统设置</h3>
+        <p class="muted">登录页与顶栏显示的系统名称、logo。改完即时生效，无需重启。</p></div>
+    </div>
+    <div class="form-row">
+      <label style="flex:1;min-width:260px">系统名称
+        <input id="br-name" class="inline" style="width:100%" value="${esc(b.system_name)}"
+               placeholder="企业知识平台"></label>
+      <button class="primary" onclick="saveBrandingName()">保存名称</button>
+    </div>
+    <div class="form-row" style="align-items:flex-start;margin-top:18px">
+      <label style="min-width:200px">登录页 logo
+        <input id="br-logo-file" type="file" accept="image/png,image/jpeg,image/webp,image/gif">
+        <span class="muted" style="font-size:11.5px">支持 PNG / JPEG / WEBP / GIF，≤ 2MB。
+          不支持 SVG（可能带脚本）。</span>
+      </label>
+      <div>
+        <div id="br-logo-preview" style="width:132px;height:132px;border:1px solid var(--line);
+             border-radius:12px;display:grid;place-items:center;overflow:hidden;background:var(--panel2)">
+          ${b.has_logo ? `<img src="/api/v1/branding/logo?t=${Date.now()}" style="max-width:100%;max-height:100%">`
+                       : `<span class="muted" style="font-size:12px">未设置</span>`}
+        </div>
+        <div style="display:flex;gap:8px;margin-top:10px">
+          <button class="primary" onclick="uploadBrandingLogo()">上传并启用</button>
+          <button class="sm" onclick="removeBrandingLogo()">移除</button>
+        </div>
+      </div>
+    </div>`;
+}
+window.saveBrandingName = async () => {
+  const name = (($("#br-name") || {}).value) || "";
+  try {
+    const b = await api("/api/v1/admin/branding", {
+      method: "PUT", body: { system_name: name.trim() },
+    });
+    applyBranding(b);
+    toast("系统名称已更新");
+  } catch (e) { toast("保存失败: " + e.message); }
+};
+window.uploadBrandingLogo = async () => {
+  const inp = $("#br-logo-file");
+  const f = inp && inp.files && inp.files[0];
+  if (!f) { toast("先选一个图片文件"); return; }
+  const fd = new FormData();
+  fd.append("file", f);
+  try {
+    const b = await api("/api/v1/admin/branding/logo", { method: "POST", body: fd });
+    applyBranding(b);
+    toast("logo 已更新");
+    adminBranding($("#admin-body"));
+  } catch (e) { toast("上传失败: " + e.message); }
+};
+window.removeBrandingLogo = async () => {
+  try {
+    const b = await api("/api/v1/admin/branding/logo", { method: "DELETE" });
+    applyBranding(b);
+    toast("logo 已移除");
+    adminBranding($("#admin-body"));
+  } catch (e) { toast("移除失败: " + e.message); }
 };
 
 /* ---------------------------------------------------------- 路由 */
@@ -1229,7 +1399,7 @@ async function loadAdmin() {
   const body = $("#admin-body");
   body.innerHTML = '<p class="muted">加载中…</p>';
   // 普通用户没有管理员专属页签，落在这些页签上时回退到「API 密钥」
-  const adminOnlyTabs = ["users", "sources", "models", "restricted", "traces"];
+  const adminOnlyTabs = ["users", "sources", "models", "restricted", "traces", "branding"];
   if (state.role !== "admin" && adminOnlyTabs.includes(state.adminTab)) {
     state.adminTab = "tokens";
   }
@@ -1242,6 +1412,7 @@ async function loadAdmin() {
     if (state.adminTab === "models") return adminModels(body);
     if (state.adminTab === "restricted") return adminRestricted(body);
     if (state.adminTab === "traces") return adminTraces(body);
+    if (state.adminTab === "branding") return adminBranding(body);
   } catch (e) { body.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
 }
 
@@ -2050,6 +2221,8 @@ $("#modal").addEventListener("click", e => { if (e.target.id === "modal") closeM
 
 /* ---------------------------------------------------------- 启动 */
 (async function boot() {
+  // 品牌（系统名称/logo）要在**登录之前**就显示，所以先拉一次
+  await loadBranding();
   try {
     const me = await api("/api/v1/me");
     showMain(me.user);

@@ -166,6 +166,28 @@ CREATE VIRTUAL TABLE IF NOT EXISTS fs_fts USING fts5(
   name, rel_path, tokenize='trigram'
 );
 
+-- 平台级键值设置（系统名称、logo 等品牌配置）
+CREATE TABLE IF NOT EXISTS app_settings (
+  key        TEXT PRIMARY KEY,
+  value      TEXT,
+  updated_at REAL
+);
+
+-- 登录验证码（一次性，5 分钟过期；只存答案哈希）
+CREATE TABLE IF NOT EXISTS auth_captcha (
+  id         TEXT PRIMARY KEY,
+  code_hash  TEXT NOT NULL,
+  created_at REAL,
+  expires_at REAL
+);
+
+-- 登录失败计数：按（客户端 IP + 用户名）记，连续失败达阈值才要求验证码
+CREATE TABLE IF NOT EXISTS login_attempts (
+  client_key TEXT PRIMARY KEY,
+  fails      INTEGER DEFAULT 0,
+  last_at    REAL
+);
+
 -- API token（每用户一枚，只存哈希）
 CREATE TABLE IF NOT EXISTS api_tokens (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,

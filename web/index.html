@@ -13,8 +13,11 @@
   <div id="login" class="login-wrap hidden">
     <div class="login-left">
       <div class="login-brand">
-        <div class="logo-mark">KB</div>
-        <h1>企业知识平台 <span>2.0</span></h1>
+        <div class="logo-mark" id="login-logo-mark">
+          <img id="login-logo" alt="" hidden>
+          <span id="login-logo-text">KB</span>
+        </div>
+        <h1><span id="login-title">企业知识平台</span> <span class="ver">2.0</span></h1>
         <p>把文件、知识与人连在一起的企业 NAS。</p>
         <ul class="login-points">
           <li>账号登录，按目录授权</li>
@@ -31,6 +34,13 @@
         <p class="muted">使用管理员分配的账号进入</p>
         <label>用户名<input id="login-user" autocomplete="username" required></label>
         <label>密码<input id="login-pass" type="password" autocomplete="current-password" required></label>
+        <label id="login-captcha-row" class="hidden">验证码
+          <span class="captcha-line">
+            <input id="login-captcha" autocomplete="off" inputmode="text" placeholder="看图输入">
+            <img id="login-captcha-img" alt="点击换一张" title="点击换一张" hidden>
+            <span id="login-captcha-prompt" class="muted" hidden></span>
+          </span>
+        </label>
         <button type="submit" class="primary">进入平台</button>
         <div id="login-err" class="err"></div>
       </form>
@@ -40,7 +50,7 @@
   <!-- 主界面 -->
   <div id="main" class="hidden">
     <header class="topbar">
-      <div class="brand">企业知识平台</div>
+      <div class="brand"><span id="brand-name">企业知识平台</span></div>
       <button id="btn-home" class="ghost home-btn" title="返回主菜单">
         <svg viewBox="0 0 24 24" aria-hidden="true">
           <path d="M3.5 11.2L12 4l8.5 7.2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
@@ -357,6 +367,7 @@
         <button data-t="models" class="admin-only">模型配置</button>
         <button data-t="restricted" class="admin-only">涉密目录</button>
         <button data-t="traces" class="admin-only">检索轨迹</button>
+        <button data-t="branding" class="admin-only">系统设置</button>
       </div>
       <div id="admin-body" class="admin-body"></div>
     </section>

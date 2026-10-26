@@ -23,6 +23,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from kbplatform import auth, models as models_mod
+from kbplatform import branding
+from kbplatform import captcha
 from kbplatform import grants as grants_mod
 from kbplatform import hashing, shortcut
 from kbplatform import fs_service
@@ -98,6 +100,9 @@ class FeedbackReq(BaseModel):
 class LoginReq(BaseModel):
     username: str
     password: str
+    # 连续登录失败后才要求验证码
+    captcha_id: Optional[str] = None
+    captcha_code: Optional[str] = None
 
 
 class UserReq(BaseModel):
@@ -376,11 +381,44 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
         return chosen, [m for m in all_models if m.is_local]
 
     # ============================================================ 认证
+    @app.get("/api/v1/auth/captcha")
+    def api_captcha(username: str = "", request: Request = None):
+        """登录验证码：连续失败到阈值后才需要，此时下发一张图片。
+
+        公开接口（登录前就要用）。答案只存在服务端，库里存哈希。
+        """
+        client = _client_ip(request) if request is not None else ""
+        need = captcha.captcha_required(conn, client, username)
+        if not need:
+            return {"required": False}
+        issued = captcha.issue(conn, cfg.data_dir, username, client)
+        issued["required"] = True
+        return issued
+
     @app.post("/api/v1/auth/login")
-    def api_login(req: LoginReq, response: Response):
+    def api_login(req: LoginReq, request: Request, response: Response):
+        client = _client_ip(request)
+        # 连续失败到阈值 → 必须带验证码
+        if captcha.captcha_required(conn, client, req.username):
+            if not captcha.verify(conn, req.captcha_id or "", req.captcha_code or ""):
+                raise HTTPException(400, detail={
+                    "message": "请输入正确的验证码",
+                    "captcha_required": True,
+                })
         u = auth.verify_login(conn, req.username, req.password)
         if u is None:
+            fails = captcha.add_fail(conn, client, req.username)
+            audit(None, (req.captcha_id or "")[:12] or None, "auth_failed",
+                  question=f"username={req.username} fails={fails}",
+                  hit_paths=None, model_used=None, restricted=False,
+                  ip=client)
+            if fails >= captcha.FAIL_THRESHOLD:
+                raise HTTPException(401, detail={
+                    "message": "用户名或密码错误（连续失败多次，请填写验证码）",
+                    "captcha_required": True,
+                })
             raise HTTPException(401, detail="用户名或密码错误")
+        captcha.reset_fails(conn, client, req.username)
         response.set_cookie(SESSION_COOKIE, make_session(u["id"]),
                             httponly=True, samesite="lax", max_age=SESSION_TTL)
         return {"user": {"id": u["id"], "username": u["username"],
@@ -403,6 +441,55 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
               "change_password", None, None, None, False,
               request.client.host if request.client else None)
         return {"ok": True, "message": "密码已修改"}
+
+    # ------------------------------------------------------------ 品牌（公开读）
+    # 登录页在**登录之前**就要显示 logo 与系统名称，所以品牌信息公开可读；
+    # 修改只能管理员。
+    @app.get("/api/v1/branding")
+    def api_branding():
+        return branding.branding_state(conn, cfg.data_dir)
+
+    @app.get("/api/v1/branding/logo")
+    def api_branding_logo():
+        path = branding.logo_path(conn, cfg.data_dir)
+        if not path:
+            raise HTTPException(404, detail="没有设置 logo")
+        return FileResponse(path, media_type="image/png",
+                            headers={"Cache-Control": "no-cache"})
+
+    @app.get("/api/v1/admin/branding")
+    def admin_branding(user=Depends(require_admin)):
+        return branding.branding_state(conn, cfg.data_dir)
+
+    @app.put("/api/v1/admin/branding")
+    def admin_set_branding(payload: dict = Body(...), user=Depends(require_admin)):
+        try:
+            name = branding.set_system_name(conn, payload.get("system_name", ""))
+        except ValueError as e:
+            raise HTTPException(400, detail=str(e))
+        audit(user["id"], None, "branding_update", question=name, ip=None)
+        return branding.branding_state(conn, cfg.data_dir)
+
+    @app.post("/api/v1/admin/branding/logo")
+    async def admin_upload_logo(request: Request, user=Depends(require_admin)):
+        form = await request.form()
+        up = form.get("file")
+        if up is None:
+            raise HTTPException(400, detail="缺少文件")
+        data = await up.read()
+        try:
+            branding.save_logo(conn, cfg.data_dir, getattr(up, "filename", ""),
+                               getattr(up, "content_type", "") or "", data)
+        except ValueError as e:
+            raise HTTPException(400, detail=str(e))
+        audit(user["id"], None, "branding_logo", question="上传 logo", ip=None)
+        return branding.branding_state(conn, cfg.data_dir)
+
+    @app.delete("/api/v1/admin/branding/logo")
+    def admin_remove_logo(user=Depends(require_admin)):
+        branding.remove_logo(conn, cfg.data_dir)
+        audit(user["id"], None, "branding_logo", question="移除 logo", ip=None)
+        return branding.branding_state(conn, cfg.data_dir)
 
     @app.get("/api/v1/me")
     def api_me(ctx=Depends(actor)):
