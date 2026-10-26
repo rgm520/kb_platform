@@ -327,6 +327,30 @@ body.fm-preview-open .fm-shell{grid-template-columns:230px minmax(0,1fr) minmax(
 .scan-btn.scan-done{color:var(--ok)}
 .scan-btn:disabled{opacity:.75;cursor:default}
 
+/* 文档看板清单：固定列宽。
+   原来九列全靠浏览器自动分配 —— 文件名列吃掉大半屏宽，共享/状态/两层进度/
+   知识点/更新时间这些短列被挤成两行（"信息化 / 管理"、"已解 / 析"）。
+   现在用 colgroup 定宽 + 短列 nowrap。 */
+#doc-table{table-layout:fixed}
+#doc-table col.c-file{width:38%}
+#doc-table col.c-share{width:8%}
+#doc-table col.c-type{width:5%}
+#doc-table col.c-status{width:7%}
+#doc-table col.c-progress{width:9%}
+#doc-table col.c-chunk{width:4%}
+#doc-table col.c-kp{width:6%}
+#doc-table col.c-time{width:13%}
+#doc-table col.c-act{width:10%}
+#doc-table td{white-space:nowrap;vertical-align:middle}
+#doc-table th{vertical-align:middle;white-space:nowrap}   /* 表头也不许拆行（类型/知识点） */
+#doc-table td .badge{white-space:nowrap}
+#doc-table td .muted{white-space:normal;display:-webkit-box;-webkit-line-clamp:2;
+  -webkit-box-orient:vertical;overflow:hidden}   /* 失败原因最多两行，完整内容靠 title */
+#doc-table td.doc-name{white-space:normal;min-width:220px}
+#doc-table td:last-child{white-space:normal}   /* 失败/跳过的行有两个按钮，允许换行 */
+#doc-table td.doc-name .doc-file{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#doc-table td.doc-name .doc-dir{font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
+
 @media (prefers-reduced-motion:reduce){
   *{animation:none!important;transition:none!important}
 }

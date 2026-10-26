@@ -464,6 +464,13 @@ function markDocFilter() {
     el.classList.toggle("active", on);
   });
 }
+/* 文件名下面那行显示**所在目录**（原来把完整路径重复一遍，白占宽度）。 */
+function parentRel(rel) {
+  const p = String(rel || "").replace(/\//g, "\\");
+  if (!p) return "";
+  const i = p.lastIndexOf("\\");
+  return i < 0 ? "" : p.slice(0, i);
+}
 async function loadDocs() {
   const q = new URLSearchParams({
     page: state.docs.page, page_size: state.docs.size,
@@ -485,11 +492,13 @@ async function loadDocs() {
       const tr = document.createElement("tr");
       tr.dataset.docId = d.id;
       tr.innerHTML = `
-        <td>${esc(d.name)}<div class="muted" style="font-size:11px">${esc(d.rel_path || "")}</div></td>
+        <td class="doc-name" title="${esc(d.rel_path || d.name)}">
+            <div class="doc-file">${esc(d.name)}</div>
+            <div class="doc-dir">${esc(parentRel(d.rel_path))}</div></td>
         <td>${esc(d.share)}</td>
         <td><code>${esc(d.ext)}</code></td>
         <td><span class="badge ${esc(d.status)}">${statusText(d.status)}</span>
-            ${d.status_detail ? `<div class="muted" style="font-size:11px">${esc(d.status_detail)}</div>` : ""}</td>
+            ${d.status_detail ? `<div class="muted" style="font-size:11px" title="${esc(d.status_detail)}">${esc(d.status_detail)}</div>` : ""}</td>
         <td><div class="two-tier"><span class="dot ${d.tier1_done ? "on" : ""}"></span>解析
             <span class="dot t2 ${d.tier2_done ? "on" : ""}"></span>提炼</div></td>
         <td>${d.chunk_count || 0}</td>
