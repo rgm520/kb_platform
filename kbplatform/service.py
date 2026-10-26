@@ -408,7 +408,7 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
         u = auth.verify_login(conn, req.username, req.password)
         if u is None:
             fails = captcha.add_fail(conn, client, req.username)
-            audit(None, (req.captcha_id or "")[:12] or None, "auth_failed",
+            audit(None, "session", "auth_failed",
                   question=f"username={req.username} fails={fails}",
                   hit_paths=None, model_used=None, restricted=False,
                   ip=client)
