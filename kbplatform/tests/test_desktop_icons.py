@@ -52,3 +52,18 @@ def test_topbar_has_no_nav_menu_but_a_home_button():
     app = Path("web/static/app.js").read_text(encoding="utf-8")
     assert "btn-home" in app and "#/desktop" in app, "主菜单按钮没绑定跳转"
 
+
+def test_login_always_lands_on_app_menu():
+    """登录后默认进功能菜单（桌面）—— 不管登录前停在哪个页面。
+
+    但**刷新/书签**时不该把人踢回桌面：会话恢复要留在原页面。
+    """
+    app_js = Path("web/static/app.js").read_text(encoding="utf-8")
+    handler = app_js[app_js.index('login-form'):app_js.index('login-form') + 1400]
+    assert 'location.hash = "#/desktop"' in handler, "登录后没有强制回到功能菜单"
+
+    show_main = app_js[app_js.index('function showMain'):app_js.index('function showMain') + 1000]
+    assert 'location.hash === "#/board"' not in show_main, \
+        "会话恢复时不该把当前页面改写成别的页"
+    assert show_main.count('location.hash = ') <= 1, "会话恢复时只允许在 hash 为空时补默认值"
+
