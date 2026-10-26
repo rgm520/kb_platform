@@ -385,7 +385,7 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
                             httponly=True, samesite="lax", max_age=SESSION_TTL)
         return {"user": {"id": u["id"], "username": u["username"],
                          "role": u["role"], "display_name": u["display_name"]},
-                "scopes": describe_scopes(load_scopes(conn, u["id"]))}
+                "scopes": _user_scope_labels(u["id"])}
 
     @app.post("/api/v1/auth/logout")
     def api_logout(response: Response):
@@ -414,7 +414,7 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
         u = ctx["user"]
         return {"user": {"id": u["id"], "username": u["username"], "role": u["role"],
                          "display_name": u["display_name"], "dept": u["dept"]},
-                "scopes": describe_scopes(load_scopes(conn, u["id"])),
+                "scopes": _user_scope_labels(u["id"]),
                 "via": ctx.get("via", "session")}
 
     # ============================================================ 问答
@@ -1429,6 +1429,17 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
             raise HTTPException(404, detail="共享不存在")
         return {"subdirs": nas_mod.expand_subdir(unc, subpath)}
 
+    def _user_scope_labels(user_id: int) -> list[str]:
+        """用户可见范围的标签：授权（grants）∪ 老范围。
+
+        与实际生效的口径一致（统一授权），只显示老表会让管理员以为"没给权限"。
+        """
+        out = list(grants_mod.describe_grants(conn, user_id))
+        for lab in describe_scopes(load_scopes(conn, user_id)):
+            if lab not in out:
+                out.append(lab)
+        return out
+
     @app.get("/api/v1/admin/users")
     def admin_users(ctx=Depends(require_admin)):
         rows = conn.execute("SELECT id,username,display_name,role,dept,active,created_at"
@@ -1436,9 +1447,41 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
         out = []
         for r in rows:
             d = dict(r)
-            d["scopes"] = describe_scopes(load_scopes(conn, r["id"]))
+            d["scopes"] = _user_scope_labels(r["id"])
             out.append(d)
         return {"users": out}
+
+    def _apply_user_scopes(user_id: int, legacy: list[tuple[str, str]]) -> dict:
+        """把"共享/子目录"范围同时落到 2.0 授权（grants）与老表（user_scopes）。
+
+        文件页按 grants 过滤、看板按 grants ∪ 老范围过滤 —— 所以新范围
+        必须**立刻**写进 grants，不能等下次平台启动时的迁移，否则新建的
+        用户在文件页要等重启才看得到目录。
+        """
+        items, pending = [], []
+        for share, subpath in legacy:
+            sid = grants_mod.find_source_for_share(conn, cfg, share)
+            if sid is None:
+                pending.append((share, subpath))
+            else:
+                items.append({"source_id": sid, "subpath": (subpath or "").strip("\\"),
+                              "can_write": False})
+        if items:
+            # 已有 2.0 授权的保留写权限，只覆盖目录范围
+            old = {g.source_id: g for g in grants_mod.user_grants(conn, {"id": user_id, "role": "user"})}
+            for it in items:
+                if it["source_id"] in old and old[it["source_id"]].can_write:
+                    it["can_write"] = True
+            grants_mod.set_grants(conn, user_id, items)
+        conn.execute("DELETE FROM user_scopes WHERE user_id=?", (int(user_id),))
+        for share, subpath in pending:
+            conn.execute("INSERT INTO user_scopes(user_id, share, subpath) VALUES (?,?,?)",
+                         (int(user_id), share, (subpath or "").strip("\\")))
+        conn.commit()
+        return {"scopes": describe_scopes(load_scopes(conn, user_id)),
+                "grants": [{"source_id": g.source_id, "subpath": g.subpath,
+                            "can_write": g.can_write}
+                           for g in grants_mod.user_grants(conn, {"id": user_id, "role": "user"})]}
 
     @app.post("/api/v1/admin/users")
     def admin_create_user(req: UserReq, ctx=Depends(require_admin)):
@@ -1447,6 +1490,8 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
             raise HTTPException(400, detail="用户名不能为空")
         if len(username) > 64 or any(ch.isspace() or ord(ch) < 32 for ch in username):
             raise HTTPException(400, detail="用户名不能包含空格或控制字符，且不超过 64 字符")
+        if not (req.password or "").strip() or len(req.password) < auth.MIN_PASSWORD_LEN:
+            raise HTTPException(400, detail=f"初始密码至少 {auth.MIN_PASSWORD_LEN} 位")
         if auth.get_user(conn, username):
             raise HTTPException(409, detail="用户名已存在")
         dup = conn.execute("SELECT id FROM users WHERE lower(username)=lower(?)",
@@ -1455,7 +1500,8 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
             raise HTTPException(409, detail="用户名已存在")
         uid = auth.create_user(conn, username, req.password, req.role,
                                req.display_name, req.dept)
-        auth.set_scopes(conn, uid, [(s[0], s[1]) for s in req.scopes])
+        # 初始可见范围立刻生效（写进 grants），不等下次平台启动的迁移
+        _apply_user_scopes(uid, [(s[0], s[1]) for s in req.scopes])
         return {"id": uid}
 
     @app.put("/api/v1/admin/users/{user_id}")
@@ -1536,29 +1582,9 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
         在两边同时生效。共享还没接入成存储源时，退回写老表（看板仍可见）。
         """
         legacy = [(s[0], s[1]) for s in req.scopes]
-        items, pending = [], []
-        for share, subpath in legacy:
-            sid = grants_mod.find_source_for_share(conn, cfg, share)
-            if sid is None:
-                pending.append((share, subpath))
-            else:
-                items.append({"source_id": sid, "subpath": subpath, "can_write": False})
-        if items:
-            # 已有 2.0 授权的保留写权限，只覆盖目录范围
-            old = {g.source_id: g for g in grants_mod.user_grants(conn, {"id": user_id, "role": "user"})}
-            for it in items:
-                if it["source_id"] in old and old[it["source_id"]].can_write:
-                    it["can_write"] = True
-            grants_mod.set_grants(conn, user_id, items)
-        conn.execute("DELETE FROM user_scopes WHERE user_id=?", (int(user_id),))
-        for share, subpath in pending:
-            conn.execute("INSERT INTO user_scopes(user_id, share, subpath) VALUES (?,?,?)",
-                         (int(user_id), share, subpath))
-        conn.commit()
-        return {"ok": True, "scopes": describe_scopes(load_scopes(conn, user_id)),
-                "grants": [{"source_id": g.source_id, "subpath": g.subpath,
-                            "can_write": g.can_write}
-                           for g in grants_mod.user_grants(conn, {"id": user_id, "role": "user"})]}
+        out = _apply_user_scopes(user_id, legacy)
+        out["ok"] = True
+        return out
 
     @app.put("/api/v1/admin/users/{user_id}/active")
     def admin_set_active(user_id: int, req: ActiveReq, ctx=Depends(require_admin)):

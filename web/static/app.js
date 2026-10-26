@@ -10,6 +10,9 @@ const state = {
   cy: null, models: [], adminTab: "users",
   restrictedDirs: [],
   tokenUserFilter: null, tokenLabel: "", tokenCounts: {},
+  // 建号表单的草稿：面板每次重渲染都会重建 DOM，不存草稿的话，
+  // 管理员填到一半点别处（授权/密钥/标记…）回来就发现输入框被清空了
+  newUserDraft: {},
 };
 
 function toast(msg, ms) {
@@ -1164,18 +1167,21 @@ async function adminUsers(body) {
   for (const t of tok.tokens) cnt[t.user_id] = (cnt[t.user_id] || 0) + 1;
   state.tokenCounts = cnt;
   state.adminUsers = r.users || [];
+  const nd = state.newUserDraft || (state.newUserDraft = {});
   body.innerHTML = `
     <div class="form-row">
-      <label>用户名<input id="nu-name" class="inline"></label>
-      <label>显示名<input id="nu-disp" class="inline"></label>
-      <label>初始密码<input id="nu-pass" class="inline" type="password"></label>
-      <label>角色<select id="nu-role" class="inline"><option value="user">普通用户</option><option value="admin">管理员</option></select></label>
+      <label>用户名<input id="nu-name" class="inline" value="${esc(nd.username || "")}"></label>
+      <label>显示名<input id="nu-disp" class="inline" value="${esc(nd.display_name || "")}"></label>
+      <label>初始密码<input id="nu-pass" class="inline" type="password" value="${esc(nd.password || "")}"></label>
+      <label>角色<select id="nu-role" class="inline">
+        <option value="user"${nd.role === "admin" ? "" : " selected"}>普通用户</option>
+        <option value="admin"${nd.role === "admin" ? " selected" : ""}>管理员</option></select></label>
       <button class="primary" onclick="createUser()">新建用户</button>
     </div>
     <div class="form-row">
-      <label>共享<input id="ns-share" class="inline" placeholder="如 信息化管理"></label>
-      <label>子目录<input id="ns-sub" class="inline" placeholder="留空=整共享"></label>
-      <button onclick="addScope()">为所选用户授权目录</button>
+      <label>初始可见范围（可选）· 共享<input id="ns-share" class="inline" placeholder="如 信息化管理" value="${esc(nd.share || "")}"></label>
+      <label>子目录<input id="ns-sub" class="inline" placeholder="留空=整共享" value="${esc(nd.sub || "")}"></label>
+      <span class="muted">建号后立刻生效：文件页与文档看板同一套范围</span>
     </div>
     <table><thead><tr><th>ID</th><th>用户名</th><th>显示名</th><th>角色</th><th>可见范围</th><th>状态</th><th>操作</th></tr></thead><tbody>
     ${r.users.map(u => `<tr>
@@ -1191,7 +1197,21 @@ async function adminUsers(body) {
          <button class="sm" onclick="filterTokensOf(${u.id})">密钥 ${tokenCount(u.id)}</button>
          <button class="sm" onclick="toggleActive(${u.id},${u.active ? 0 : 1})">${u.active ? "停用" : "启用"}</button></td></tr>`).join("")}
     </tbody></table>`;
+  // 表单输入随时存草稿，避免面板重渲染把管理员填了一半的内容冲掉
+  ["nu-name", "nu-disp", "nu-pass", "nu-role", "ns-share", "ns-sub"].forEach((id) => {
+    const el = $("#" + id);
+    if (el) el.addEventListener("input", saveNewUserDraft);
+  });
 }
+
+/** 把建号表单当前内容存进草稿（面板重渲染后据此恢复）。 */
+window.saveNewUserDraft = () => {
+  const g = (id) => { const el = $("#" + id); return el ? el.value : ""; };
+  state.newUserDraft = {
+    username: g("nu-name"), display_name: g("nu-disp"), password: g("nu-pass"),
+    role: g("nu-role"), share: g("ns-share"), sub: g("ns-sub"),
+  };
+};
 
 /* 修改用户信息：用户名 / 显示名 / 角色 / 部门 / 启用状态，可选重置密码 */
 window.editUser = (id) => {
@@ -1242,11 +1262,27 @@ window.editUser = (id) => {
   };
 };
 window.createUser = async () => {
+  saveNewUserDraft();
+  const d = state.newUserDraft;
+  const username = (d.username || "").trim();
+  const password = d.password || "";
+  const focus = (id) => { const el = $("#" + id); if (el) el.focus(); };
+  // 就地校验：不给一个必然失败的请求去浪费一次往返
+  if (!username) { toast("请填写用户名"); focus("nu-name"); return; }
+  if (/\s/.test(username) || username.length > 64) {
+    toast("用户名不能包含空格，且不超过 64 个字符"); focus("nu-name"); return;
+  }
+  if (!password) { toast("请填写初始密码"); focus("nu-pass"); return; }
+  if (password.length < 8) { toast("初始密码至少 8 位"); focus("nu-pass"); return; }
+  const share = (d.share || "").trim();
+  const scopes = share ? [[share, (d.sub || "").trim()]] : [];
   try {
     await api("/api/v1/admin/users", { method: "POST", body: {
-      username: $("#nu-name").value.trim(), password: $("#nu-pass").value,
-      role: $("#nu-role").value, display_name: $("#nu-disp").value.trim(), scopes: [] } });
-    toast("用户已创建"); loadAdmin();
+      username: username, password: password, role: d.role || "user",
+      display_name: (d.display_name || "").trim(), scopes: scopes } });
+    state.newUserDraft = {};
+    toast(scopes.length ? "用户已创建，并已授予初始可见范围" : "用户已创建");
+    loadAdmin();
   } catch (e) { toast("创建失败: " + e.message); }
 };
 window.toggleActive = async (id, active) => {

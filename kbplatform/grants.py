@@ -82,6 +82,26 @@ def user_grants(conn, user) -> list[Grant]:
     return out
 
 
+def describe_grants(conn, user_id: int) -> list[str]:
+    """把授权（grants）渲染成"共享\\子目录"的可读标签（与老范围同一套写法）。
+
+    管理台的「可见范围」列按这个显示 —— grants 才是真正生效的那一套，
+    只显示老表会让管理员以为"没给权限"。
+    """
+    rows = conn.execute(
+        "SELECT g.subpath, s.root FROM grants g "
+        "JOIN storage_sources s ON s.id=g.source_id WHERE g.user_id=?",
+        (int(user_id),)).fetchall()
+    out: list[str] = []
+    for r in rows:
+        share, base = split_share(norm_unc(r["root"]))
+        parts = [p for p in (share, base, (r["subpath"] or "").strip("\\")) if p]
+        label = "\\".join(parts)
+        if label not in out:
+            out.append(label)
+    return out
+
+
 def can_read(user, grants: list[Grant], source_id: int, rel: str) -> bool:
     if _is_admin(user):
         return True
