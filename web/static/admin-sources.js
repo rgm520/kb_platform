@@ -14,6 +14,51 @@ window.KB = window.KB || {};
   const val = (id) => { const e = $("#" + id); return e ? e.value : ""; };
   const checked = (id) => { const e = $("#" + id); return e ? !!e.checked : false; };
 
+  /* 「扫描」按钮三态：扫描（白）→ 解析中（红）→ 已解析（绿）。
+     新接入的共享点一次扫描，就按整个共享开始解析（后端会把 index_all 置 1）。 */
+  function scanMeta(s) {
+    if (s.scan_state === "scanning") {
+      return { label: "解析中", cls: "scan-running", busy: true };
+    }
+    if (s.scan_state === "error") {
+      return { label: "扫描失败", cls: "scan-running", busy: false };
+    }
+    if (s.scan_done_at) return { label: "已解析", cls: "scan-done", busy: false };
+    return { label: "扫描", cls: "", busy: false };
+  }
+  function scanTitle(s) {
+    if (s.scan_state === "scanning") return "正在解析这个共享的文件";
+    if (s.scan_state === "error") return "上次扫描失败：" + (s.scan_error || "未知原因") + "（再点一次重试）";
+    if (s.scan_done_at) return "已解析完成；再点是增量扫描（只处理新增/改动）";
+    return "按整个共享解析这个存储里的文件（PPT/Word/PDF/Excel/文本），建索引后可检索";
+  }
+  /* 只更新这一行的状态，不重绘整页 —— 管理员可能正开着编辑表单。 */
+  function applyScanMeta(id, meta) {
+    const td = document.querySelector(`[data-scan-state="${id}"]`);
+    if (td) td.textContent = meta.label;
+    const btn = document.querySelector(`button[data-scan="${id}"]`);
+    if (btn) {
+      btn.textContent = meta.label;
+      btn.classList.remove("scan-running", "scan-done");
+      if (meta.cls) btn.classList.add(meta.cls);
+      btn.disabled = !!meta.busy;
+    }
+  }
+  async function pollScan(id, n = 0) {
+    if (n > 900) return;                       // 最多盯 ~30 分钟
+    try {
+      const st = await api(`/api/v1/admin/sources/${id}/scan/status`);
+      const meta = scanMeta({ scan_state: st.state, scan_done_at: st.scan_done_at });
+      applyScanMeta(id, meta);
+      if (st.state === "scanning") {
+        setTimeout(() => pollScan(id, n + 1), 2000);
+        return;
+      }
+      if (st.state === "error") toast("解析失败：" + (st.error || "未知原因"));
+      else toast("解析完成");
+    } catch (e) { /* 轮询失败就停在当前显示，不打扰用户 */ }
+  }
+
   /* ------------------------------------------------------------ 列表 */
   async function render(body) {
     body = body || bodyEl();
@@ -53,21 +98,27 @@ window.KB = window.KB || {};
       <div class="table-wrap"><table>
         <thead><tr><th>名称</th><th>类型</th><th>根路径</th><th>密码</th><th>可写</th>
           <th>扫描状态</th><th>最近扫描</th><th>操作</th></tr></thead>
-        <tbody>${sources.map((s) => `<tr>
+        <tbody>${sources.map((s) => {
+          const m = scanMeta(s);
+          const stateText = !s.enabled ? "已停用" : m.label;
+          return `<tr>
           <td>${esc2(s.name)}</td><td>${esc2(s.kind)}</td>
           <td class="muted" title="${esc2(s.root)}">${esc2(s.root)}</td>
           <td>${s.has_password ? '<span class="fm-badge done">已配置</span>' : '<span class="fm-badge">未配置</span>'}</td>
           <td>${s.writable ? "是" : "否"}</td>
-          <td>${s.scan_state === "error"
-            ? `<span class="err" title="${esc2(s.scan_error || "")}">错误</span>`
-            : (s.scan_state === "scanning" ? "扫描中" : (s.enabled ? "空闲" : "已停用"))}</td>
+          <td data-scan-state="${s.id}">${s.scan_state === "error"
+            ? `<span class="err" title="${esc2(s.scan_error || "")}">${stateText}</span>`
+            : stateText}</td>
           <td class="muted">${fmt(s.last_scan_at)}</td>
           <td>
             <button class="sm" onclick="KB.adminSources.test(${s.id})">测试</button>
-            <button class="sm" onclick="KB.adminSources.scan(${s.id})">扫描</button>
+            <button class="sm scan-btn ${m.cls}" data-scan="${s.id}" ${m.busy ? "disabled" : ""}
+              title="${esc2(scanTitle(s))}"
+              onclick="KB.adminSources.scan(${s.id})">${m.label}</button>
             <button class="sm" onclick="KB.adminSources.edit(${s.id})">编辑</button>
             <button class="sm" onclick="KB.adminSources.remove(${s.id})">删除</button>
-          </td></tr>`).join("") || '<tr><td colspan="8" class="muted">还没有接入存储源</td></tr>'}
+          </td></tr>`;
+        }).join("") || '<tr><td colspan="8" class="muted">还没有接入存储源</td></tr>'}
         </tbody></table></div>`;
     candList = cands;
   }
@@ -162,8 +213,10 @@ window.KB = window.KB || {};
   async function scan(id) {
     try {
       await api(`/api/v1/admin/sources/${id}/scan`, { method: "POST" });
-      toast("已排队扫描，稍后刷新查看状态");
-      setTimeout(() => render(bodyEl()), 1500);
+      // 先把按钮切到「解析中」，再轮询真实状态（不重绘整页，免得清掉编辑表单）
+      applyScanMeta(id, { label: "解析中", cls: "scan-running", busy: true });
+      toast("已开始解析这个共享");
+      pollScan(id);
     } catch (e) { toast("扫描失败: " + e.message); }
   }
 

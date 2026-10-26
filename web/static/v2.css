@@ -320,6 +320,13 @@ body.fm-preview-open .fm-shell{grid-template-columns:230px minmax(0,1fr) minmax(
   .up-state{display:none}
 }
 
+/* 存储源「扫描」按钮三态：扫描（白）→ 解析中（红）→ 已解析（绿）。
+   三态由 storage_sources.scan_state / scan_done_at 驱动（见 admin-sources.js）。 */
+.scan-btn{color:var(--fg)}
+.scan-btn.scan-running{color:var(--err)}
+.scan-btn.scan-done{color:var(--ok)}
+.scan-btn:disabled{opacity:.75;cursor:default}
+
 @media (prefers-reduced-motion:reduce){
   *{animation:none!important;transition:none!important}
 }

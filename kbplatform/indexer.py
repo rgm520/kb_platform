@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sqlite3
 import tempfile
 import time
@@ -16,12 +17,13 @@ from dataclasses import dataclass, field
 import kb.chunker as chunker
 import kb.parsers as parsers
 
-from kbplatform import embedding
+from kbplatform import auth, embedding
 from kbplatform import fts
 from kbplatform.converters import (LEGACY_EXT, SCAN_EXT, convert_legacy,
                                    is_ocr_backlog, ocr_pdf)
 from kbplatform.db import set_status
 from kbplatform.monitor import Change
+from kbplatform.storage import adapter_for, source_from_row
 
 
 @dataclass
@@ -61,6 +63,54 @@ def _ocr_requested(conn, catalog_id: int) -> bool:
 def _chunks_of(conn: sqlite3.Connection, file_path: str) -> list[int]:
     return [r[0] for r in conn.execute(
         "SELECT id FROM chunks WHERE file_path=?", (file_path,)).fetchall()]
+
+
+def _fetch_local(conn: sqlite3.Connection, unc_path: str) -> str | None:
+    """带账号密码的 SMB 源：把文件取到本地临时文件，返回路径；否则 None。
+
+    为什么需要：解析用的是普通 `open()`，也就是**操作系统重定向器**。
+    共享需要账号密码时，凭据只在平台的 smbclient 里，OS 打不开 UNC 路径
+    （实测 tmp_ppt：`PackageNotFoundError` → 被报成"文件无有效文本"）。
+    所以先用平台自己的适配器读一遍，落到本地临时文件再交给解析器。
+
+    匿名共享（如现网 192.0.2.19 那几个）保持原样，不额外下载。
+    """
+    path = str(unc_path or "").replace("/", "\\")
+    if not path:
+        return None
+    try:
+        rows = conn.execute(
+            "SELECT * FROM storage_sources WHERE kind='smb' AND enabled=1 "
+            "AND (COALESCE(username,'') <> '' OR secret_enc IS NOT NULL)").fetchall()
+    except sqlite3.OperationalError:
+        return None
+    low = path.lower()
+    for row in rows:
+        root = str(row["root"] or "").replace("/", "\\").rstrip("\\")
+        if not root or not low.startswith(root.lower() + "\\"):
+            continue
+        rel = path[len(root) + 1:]
+        suffix = os.path.splitext(path)[1].lower()
+        try:
+            password = auth.decrypt_secret(row["secret_enc"]) if row["secret_enc"] else None
+            adapter = adapter_for(source_from_row(row), password)
+            fd, tmp = tempfile.mkstemp(prefix="kb-fetch-", suffix=suffix)
+            os.close(fd)
+            try:
+                with adapter.open_read(rel) as src, open(tmp, "wb") as dst:
+                    shutil.copyfileobj(src, dst, 1024 * 1024)
+            except Exception:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+                raise
+            return tmp
+        except Exception:
+            # 取不下来就退回原路径解析：让下游把真实原因写进 status_detail，
+            # 这里的失败不额外制造噪音。
+            return None
+    return None
 
 
 def _delete_artifacts(conn: sqlite3.Connection, fts_path: str, vs, file_path: str) -> None:
@@ -120,38 +170,53 @@ def index_file(conn: sqlite3.Connection, fts_path: str, vs, catalog_id: int,
     老格式（.doc/.ppt/.xls）先经 LibreOffice 转换；扫描件 PDF 先经 OCR。
     转换器/OCR 不可用时**不报错**，而是标记为「待支持」并继续。
     """
-    parse_target = unc_path
-    ext = os.path.splitext(unc_path)[1].lower()
     tmpdir = convert_dir or tempfile.gettempdir()
-
-    if ext in LEGACY_EXT:
-        converted = convert_legacy(unc_path, tmpdir)
-        if not converted:
-            return _fail(conn, catalog_id,
-                         "老格式待支持（LibreOffice 不可用或转换失败）")
-        parse_target = converted
-    elif ext in SCAN_EXT:
-        # 先按普通 PDF 解析；若判定为扫描件再走 OCR
-        try:
-            _blocks, meta0 = parsers.parse_file(unc_path)
-        except Exception:
-            meta0 = {}
-        if meta0.get("need_ocr"):
-            # 存量不批量 OCR：单页约 136 秒，一个大扫描件能堵死整条队列。
-            # 但管理员在看板点了「重新解析」→ ocr_requested=1 → 这次照做。
-            if is_ocr_backlog(unc_path) and not _ocr_requested(conn, catalog_id):
-                return _defer_ocr(conn, catalog_id,
-                                  "扫描件：存量不自动 OCR（可在看板手动触发重跑）")
-            ocr_txt = ocr_pdf(unc_path, tmpdir)
-            if not ocr_txt:
-                return _defer_ocr(conn, catalog_id,
-                                  "扫描件：OCR 失败/超时，已跳过")
-            parse_target = ocr_txt
+    # 带凭据的 SMB 共享：OS 打不开 UNC（凭据在平台里），先取到本地临时文件。
+    fetched = _fetch_local(conn, unc_path)
+    parse_src = fetched or unc_path
+    parse_target = parse_src
+    ext = os.path.splitext(parse_src)[1].lower()
 
     try:
-        blocks, meta = parsers.parse_file(parse_target)
-    except Exception as e:
-        return _fail(conn, catalog_id, f"解析失败: {type(e).__name__}: {e}")
+        if ext in LEGACY_EXT:
+            converted = convert_legacy(parse_src, tmpdir)
+            if not converted:
+                return _fail(conn, catalog_id,
+                             "老格式待支持（LibreOffice 不可用或转换失败）")
+            parse_target = converted
+        elif ext in SCAN_EXT:
+            # 先按普通 PDF 解析；若判定为扫描件再走 OCR
+            try:
+                _blocks, meta0 = parsers.parse_file(parse_src)
+            except Exception:
+                meta0 = {}
+            if meta0.get("need_ocr"):
+                # 存量不批量 OCR：单页约 136 秒，一个大扫描件能堵死整条队列。
+                # 但管理员在看板点了「重新解析」→ ocr_requested=1 → 这次照做。
+                if is_ocr_backlog(parse_src) and not _ocr_requested(conn, catalog_id):
+                    return _defer_ocr(conn, catalog_id,
+                                      "扫描件：存量不自动 OCR（可在看板手动触发重跑）")
+                ocr_txt = ocr_pdf(parse_src, tmpdir)
+                if not ocr_txt:
+                    return _defer_ocr(conn, catalog_id,
+                                      "扫描件：OCR 失败/超时，已跳过")
+                parse_target = ocr_txt
+
+        try:
+            blocks, meta = parsers.parse_file(parse_target)
+        except Exception as e:
+            return _fail(conn, catalog_id, f"解析失败: {type(e).__name__}: {e}")
+    finally:
+        if fetched:
+            try:
+                os.remove(fetched)
+            except OSError:
+                pass
+
+    # 解析器把异常吞成空块时，如实报出原因 —— 否则"共享读不到"会被伪装成
+    # "文件无有效文本"，运维会以为是空文件而白查一轮。
+    if meta.get("type") == "error":
+        return _fail(conn, catalog_id, f"解析失败: {meta.get('error')}")
 
     if not blocks or sum(len(b.text) for b in blocks) < 30:
         return _fail(conn, catalog_id, "文件无有效文本（可能是扫描件或空文件）")

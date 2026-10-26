@@ -7,7 +7,7 @@ from kbplatform import catalog as cat
 from kbplatform import fts
 from kbplatform import indexer
 from kbplatform import hashing
-from kbplatform import extract as extract_mod
+from kbplatform import auth, extract as extract_mod
 from kbplatform import models as models_mod
 from kbplatform.config import Config
 from kbplatform.db import init_db, purge_expired_trace_data, upsert_catalog, bump_stats
@@ -20,6 +20,12 @@ from kbplatform.vectors import VectorStore
 class Pipeline:
     def __init__(self, config: Config):
         self.cfg = config
+        # 流水线是**独立进程**（supervisor 起的 `python -m kbplatform.pipeline`），
+        # 网页进程注入的主密钥不会跟过来。不在这里注入，就解不开存储源里
+        # 加密保存的共享密码 → 带凭据的 SMB 共享（如 tmp_ppt）全解析失败。
+        # 配置没写就先不动，别把别处已注入的密钥清掉。
+        if config.session_secret:
+            auth.set_encryption_key(config.session_secret, config.token_recoverable)
         self.conn = init_db(config.db_path)
         self.vs = VectorStore(config.vector_dir, dim=config.embed_dim)
         self.queue = JobQueue(self.conn)

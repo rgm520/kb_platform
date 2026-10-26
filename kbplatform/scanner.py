@@ -23,15 +23,20 @@ from kbplatform.storage import adapter_for, source_from_row
 from kbplatform.vectors import VectorStore
 
 
-def index_scope_for(cfg: Config, source) -> tuple[bool, str]:
+def index_scope_for(cfg: Config, source, index_all: bool = False) -> tuple[bool, str]:
     """这个存储源的**索引/解析范围**（相对 source.root 的子目录）。
 
-    浏览范围是整个存储源（管理员能看到共享里的全部文件夹），
-    但**只解析配置里监控的那部分**（[monitor].roots）——
-    否则一个共享里十几万文件会被全量解析，把队列和算力吃干。
+    浏览范围是整个存储源（管理员能看到共享里的全部文件夹）。
+    解析范围有两种来源：
+      * `index_all=1`：管理员在「存储接入」里对这个源点过扫描 ——
+        整个共享都解析（新接入的共享走这条）；
+      * 否则只看配置里的监控范围（[monitor].roots）—— 存量部署的行为不变，
+        一个共享里十几万文件不会被无脑全量解析。
 
     返回 (是否要索引, 相对子目录)；不在监控范围 → (False, "")。
     """
+    if index_all:
+        return True, ""
     root = norm_unc(source.root).rstrip("\\")
     roots = [m for m in (cfg.monitor_roots or []) if m]
     if not roots:
@@ -86,21 +91,27 @@ class SourceScanner:
             try:
                 password = auth.decrypt_secret(row["secret_enc"]) if row["secret_enc"] else None
                 adapter = adapter_for(source, password)
-                want, scope = index_scope_for(self.cfg, source)
+                index_all = bool(row["index_all"]) if "index_all" in row.keys() else False
+                want, scope = index_scope_for(self.cfg, source, index_all=index_all)
                 if not want:
                     # 这个共享不在监控范围里：只浏览，不索引不解析
                     self.conn.execute(
                         "UPDATE storage_sources SET scan_state='idle', scan_error=? WHERE id=?",
-                        ("该共享不在配置的监控范围内（[monitor].roots），仅浏览不解析", sid))
+                        ("尚未纳入解析索引：在「存储接入」里点一次「扫描」即可开始解析该共享",
+                         sid))
                     self.conn.commit()
                     return {"skipped": "不在监控范围"}
                 stats = fsindex.scan_source(self.conn, source, adapter,
                                             qps=self.cfg.scan_qps, scope=scope)
+                # 根目录读不到 = 这次扫描失败（共享掉线/权限变了/路径不存在）。
+                # 子目录读失败仍按"部分失败"处理，不把整次扫描判死。
+                if any(str(e).startswith("/: ") for e in stats.get("errors", [])):
+                    raise RuntimeError(str(stats["errors"][0]))
                 self._progress[sid] = stats["files"] + stats["dirs"]
                 enqueued = self._sync_catalog(source, stats)
                 self.conn.execute(
-                    "UPDATE storage_sources SET scan_state='idle', last_scan_at=? WHERE id=?",
-                    (time.time(), sid))
+                    "UPDATE storage_sources SET scan_state='idle', last_scan_at=?,"
+                    " scan_done_at=? WHERE id=?", (time.time(), time.time(), sid))
                 self.conn.commit()
                 stats["catalog_enqueued"] = enqueued
                 return stats
@@ -203,10 +214,11 @@ class SourceScanner:
 
     def status(self, source_id: int | None = None):
         rows = self.conn.execute(
-            "SELECT id,name,scan_state,scan_error,last_scan_at FROM storage_sources "
-            "ORDER BY id").fetchall()
+            "SELECT id,name,scan_state,scan_error,last_scan_at,scan_done_at,index_all "
+            "FROM storage_sources ORDER BY id").fetchall()
         items = [{"id": r["id"], "name": r["name"], "state": r["scan_state"],
                   "error": r["scan_error"], "last_scan_at": r["last_scan_at"],
+                  "scan_done_at": r["scan_done_at"], "index_all": bool(r["index_all"]),
                   "progress": self._progress.get(int(r["id"]), 0)} for r in rows]
         if source_id is not None:
             for it in items:

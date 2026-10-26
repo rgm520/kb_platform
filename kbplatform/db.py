@@ -96,6 +96,8 @@ CREATE TABLE IF NOT EXISTS storage_sources (
   scan_state    TEXT DEFAULT 'idle',          -- idle | scanning | paused | error
   scan_error    TEXT,
   last_scan_at  REAL,
+  index_all     INTEGER DEFAULT 0,            -- 1=点扫描时整个共享都解析
+  scan_done_at  REAL,                         -- 最近一次成功扫描完成时间（按钮「已解析」）
   created_at    REAL
 );
 
@@ -513,7 +515,14 @@ def init_db(db_path: str) -> sqlite3.Connection:
                  "ALTER TABLE catalog ADD COLUMN ocr_requested INTEGER DEFAULT 0",
                  # 重复文件识别用的内容哈希（不按文件名判断）
                  "ALTER TABLE catalog ADD COLUMN md5 TEXT",
-                 "ALTER TABLE catalog ADD COLUMN md5_at REAL"):
+                 "ALTER TABLE catalog ADD COLUMN md5_at REAL",
+                 # 存储源「点扫描 = 整共享解析」的开关（持久化，重启/定时扫描都认）。
+                 # 没有这一列时，解析范围只能由 [monitor].roots 决定，新接入的
+                 # 共享点扫描只会得到「仅浏览不解析」。
+                 "ALTER TABLE storage_sources ADD COLUMN index_all INTEGER DEFAULT 0",
+                 # 最近一次**成功**扫描完成的时间：前端按钮据它画「已解析」（绿）。
+                 # 不能复用 last_scan_at —— 跳过/失败也会写它。
+                 "ALTER TABLE storage_sources ADD COLUMN scan_done_at REAL"):
         try:
             conn.execute(ddl)
         except sqlite3.OperationalError:

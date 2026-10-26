@@ -22,6 +22,7 @@ from kbplatform.grants import (can_read, can_write, filter_entries,
                                migrate_user_scopes, set_grants, user_grants)
 from kbplatform.paths import split_share
 from kbplatform.platform_dirs import is_platform_rel
+from kbplatform.scanner import index_scope_for
 from kbplatform.storage import (Entry, Source, adapter_for, is_safe_rel, normalize_rel,
                                 source_from_row, test_connection)
 
@@ -184,6 +185,10 @@ def _source_admin_dict(r) -> dict:
         "enabled": bool(r["enabled"]), "has_password": bool(r["secret_enc"]),
         "scan_state": r["scan_state"], "scan_error": r["scan_error"],
         "last_scan_at": r["last_scan_at"],
+        # 「扫描」按钮三态的数据来源：index_all=整共享解析，
+        # scan_done_at=最近一次成功扫描（有值 → 绿色「已解析」）
+        "index_all": bool(r["index_all"]) if "index_all" in r.keys() else False,
+        "scan_done_at": r["scan_done_at"] if "scan_done_at" in r.keys() else None,
     }
 
 
@@ -866,9 +871,23 @@ def register_fs_routes(app, cfg: Config, conn, require_user, require_admin, audi
 
     @app.post("/api/v1/admin/sources/{source_id}/scan")
     def admin_source_scan(source_id: int, user=Depends(require_admin)):
-        _source_any(source_id)
+        """点「扫描」= 把这个共享纳入解析（新接入的源按整个共享解析）。
+
+        不在 [monitor].roots 覆盖范围内的源，点扫描即把它标记成「整共享解析」
+        （存库，重启和定时扫描都认）；已受监控范围覆盖的源保持原范围，
+        避免把存量共享的解析范围突然放大。之后每次点都是增量。
+        """
+        row = _source_any(source_id)
+        want, _scope = index_scope_for(cfg, source_from_row(row))
+        if not want:
+            conn.execute("UPDATE storage_sources SET index_all=1 WHERE id=?",
+                         (int(source_id),))
+            conn.commit()
         app.state.scanner.trigger(int(source_id))
-        return {"queued": True}
+        audit(user["id"], None, "source_scan", question=row["name"],
+              hit_paths=[row["root"]], ip=None)
+        return {"queued": True,
+                "index_all": 1 if (not want or _source_any(source_id)["index_all"]) else 0}
 
     @app.get("/api/v1/admin/sources/{source_id}/scan/status")
     def admin_source_scan_status(source_id: int, user=Depends(require_admin)):
