@@ -34,7 +34,7 @@ button.sm{padding:4px 9px;font-size:12px}
   padding:5px 12px;border-radius:8px;border:1px solid var(--line)}
 .home-btn:hover{border-color:rgba(34,211,238,.45);color:var(--tech);background:rgba(34,211,238,.08)}
 .home-btn svg{width:16px;height:16px}
-.topbar .right{display:flex;align-items:center;gap:12px}
+.topbar .right{display:flex;align-items:center;gap:12px;margin-left:auto}  /* 顶栏没有导航了，靠这个把用户区推到最右 */
 
 /* 页面 */
 .page{padding:20px;display:none}

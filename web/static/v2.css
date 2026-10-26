@@ -375,6 +375,41 @@ body.fm-preview-open .fm-shell{grid-template-columns:230px minmax(0,1fr) minmax(
 #doc-table td.doc-name .doc-file{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #doc-table td.doc-name .doc-dir{font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
 
+/* ------------------------------------------------------------ 顶栏用户区
+   右上角：头像 + 姓名；「修改密码 / 退出」收进头像的下拉菜单。 */
+.user-menu{position:relative}
+.user-btn{
+  display:inline-flex;align-items:center;gap:9px;padding:4px 10px 4px 4px;
+  border:1px solid transparent;border-radius:999px;background:transparent;color:var(--fg);
+}
+.user-btn:hover,.user-btn.open{border-color:rgba(34,211,238,.4);background:rgba(34,211,238,.08)}
+.user-avatar{
+  width:30px;height:30px;border-radius:50%;flex:0 0 auto;display:grid;place-items:center;
+  background:linear-gradient(135deg,#22d3ee 0%,#4f8cff 55%,#8b5cf6 100%);
+  box-shadow:0 2px 10px rgba(34,211,238,.35);
+}
+.user-avatar svg{width:18px;height:18px;fill:#06121f;opacity:.92}
+.user-avatar.big{width:38px;height:38px}
+.user-avatar.big svg{width:22px;height:22px}
+.user-name{font-size:13px;color:var(--fg);max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.user-caret{width:14px;height:14px;color:var(--muted)}
+.user-drop{
+  position:absolute;right:0;top:calc(100% + 8px);z-index:60;min-width:212px;
+  background:var(--panel);border:1px solid var(--line);border-radius:12px;
+  box-shadow:0 18px 46px rgba(0,0,0,.6);padding:6px;overflow:hidden;
+}
+.user-drop-head{display:flex;align-items:center;gap:10px;padding:8px 8px 10px;border-bottom:1px solid var(--line);margin-bottom:4px}
+.ud-id{min-width:0}
+.ud-name{font-size:13.5px;font-weight:600;color:var(--fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ud-role{font-size:11.5px;color:var(--muted);margin-top:1px}
+.ud-item{
+  display:block;width:100%;text-align:left;padding:8px 10px;border:0;border-radius:8px;
+  background:transparent;color:var(--fg);font-size:13px;
+}
+.ud-item:hover{background:rgba(34,211,238,.1)}
+.ud-item.danger{color:#f85149}
+.ud-item.danger:hover{background:rgba(248,81,73,.12)}
+
 @media (prefers-reduced-motion:reduce){
   *{animation:none!important;transition:none!important}
 }

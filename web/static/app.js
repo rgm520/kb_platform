@@ -104,6 +104,9 @@ function showMain(user) {
   $("#login").classList.add("hidden");
   $("#main").classList.remove("hidden");
   $("#who").textContent = (user.display_name || user.username) + (user.role === "admin" ? "（管理员）" : "");
+  const udName = $("#ud-name"), udRole = $("#ud-role");
+  if (udName) udName.textContent = user.display_name || user.username;
+  if (udRole) udRole.textContent = user.role === "admin" ? "管理员" : "普通用户";
   $$(".admin-only").forEach(e => e.classList.toggle("hidden", user.role !== "admin"));
   // 管理台默认页签：管理员进「用户与权限」，普通用户进「API 密钥」
   setAdminTab(user.role === "admin" ? "users" : "tokens");
@@ -130,6 +133,26 @@ $("#logout").addEventListener("click", async () => {
   try { await api("/api/v1/auth/logout", { method: "POST" }); } catch (e) { }
   showLogin();
 });
+
+/* ---------------------------------------------------------- 用户下拉菜单 */
+const userBtn = $("#user-btn"), userDrop = $("#user-drop");
+if (userBtn && userDrop) {
+  const setDrop = (open) => {
+    userDrop.classList.toggle("hidden", !open);
+    userBtn.classList.toggle("open", open);
+    userBtn.setAttribute("aria-expanded", open ? "true" : "false");
+  };
+  userBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    setDrop(userDrop.classList.contains("hidden"));
+  });
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest(".user-menu")) setDrop(false);
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") setDrop(false);
+  });
+}
 
 /* ---------------------------------------------------------- 返回主菜单 */
 $("#btn-home").addEventListener("click", () => { location.hash = "#/desktop"; });
