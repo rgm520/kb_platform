@@ -49,12 +49,21 @@ async function api(path, opts) {
    文件列表全都还留在 DOM 里 —— B 一进来就看得见。SPA 换用户只切显隐，
    所以这里要显式清空（清单化是为了能测试、也免得以后漏）。 */
 const USER_SCOPED_CONTAINERS = [
-  "#a-answer", "#a-cites", "#a-q", "#a-notice", "#a-feedback",  // AI 问答：上一个人的提问与回答
-  "#stat-cards", "#doc-table-wrap", "#doc-stats", "#doc-total",  // 文档看板
-  "#fm-list", "#fm-icons", "#fm-crumbs", "#fm-search-results",   // 文件页
-  "#fm-content-results", "#fm-preview", "#fm-ctx",
-  "#cy", "#g-list", "#g-side",                                  // 知识图谱
-  "#admin-body",                                                // 管理台
+  // AI 问答：上一个人的提问、回答、引用片段、提示、反馈
+  "#a-answer", "#a-cites", "#a-q", "#a-notice", "#a-feedback",
+  // 文档看板：统计卡片、**表格的行容器**（不是外层表格！清掉外层会把
+  // <table> 整个删掉，之后 loadDocs() 找不到 #doc-table tbody → 列表加载失败）、
+  // 统计视图、计数与页码
+  "#stat-cards", "#doc-table tbody", "#doc-stats", "#doc-total", "#pg-info",
+  "#f-share",
+  // 文件页：目录行、图标视图、面包屑、两种搜索结果、预览面板、右键菜单
+  "#fm-list", "#fm-icons", "#fm-crumbs", "#fm-search", "#fm-search-results",
+  "#fm-content-results", "#fm-preview", "#fm-ctx", "#fm-upload-panel",
+  // 知识图谱：侧栏与列表（画布 #cy 由 cytoscape 实例管，用 cy.clear()，
+  // 清 DOM 会把画布拆掉）
+  "#g-list", "#g-side",
+  // 管理台与弹窗
+  "#admin-body", "#modal-body",
 ];
 
 function clearUserScopedUI() {
@@ -70,6 +79,9 @@ function clearUserScopedUI() {
   });
   // 图谱画布是 cytoscape 实例，不是普通 DOM
   if (state.cy) { try { state.cy.clear(); } catch (e) { /* 忽略 */ } }
+  // 弹窗里可能留着上一个用户的内容（详情、编辑表单），连弹窗一起关掉
+  const modal = $("#modal");
+  if (modal) modal.classList.add("hidden");
   // 状态里同样不能留上一个用户的数据
   state.docs = { page: 1, size: 50, total: 0 };
   state.duplicates = []; state.dupSel = {}; state.dupCollapsed = {};

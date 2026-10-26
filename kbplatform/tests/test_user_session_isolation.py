@@ -17,6 +17,7 @@ B 的 AI 问答页上**还留着 A 刚才的问题与回答**（同一个浏览�
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,13 @@ from kbplatform.auth import create_user
 from kbplatform.service import make_app
 
 FAKE_ANSWER = "（模拟回答）这是测试用的回答。"
+
+
+def _cleanup_list_block(js: str) -> str:
+    """只取 USER_SCOPED_CONTAINERS 这一块 —— 别处的同名 id 不算进清理名单。"""
+    start = js.index("const USER_SCOPED_CONTAINERS = [")
+    end = js.index("];", start)
+    return js[start:end]
 
 
 @pytest.fixture()
@@ -120,3 +128,24 @@ def test_frontend_ask_page_containers_are_in_cleanup_list():
     """把要清的容器抽成一份名单，便于测试与后续维护。"""
     js = Path("web/static/app.js").read_text(encoding="utf-8")
     assert "USER_SCOPED_CONTAINERS" in js, "清理容器名单没抽出来"
+
+
+def test_cleanup_list_keeps_structure_the_page_still_needs():
+    """清理名单里不能有"页面之后还要往里写"的结构性容器。
+
+    回归（2026-10-26）：名单里放了 #doc-table-wrap（表格的外层容器），
+    清空它把整个 <table> 删掉了 → 随后 loadDocs() 里
+    `$("#doc-table tbody").innerHTML = ...` 拿到 null →
+    "文档列表加载失败: Cannot set properties of null (setting 'innerHTML')"。
+    图谱画布 #cy 同理：它由 cytoscape 实例管，清 DOM 会把画布拆了。
+    """
+    js = Path("web/static/app.js").read_text(encoding="utf-8")
+    block = _cleanup_list_block(js)
+    assert '"#doc-table-wrap"' not in block, "清理名单里有表格外层容器，会把表格结构删掉"
+    assert '"#doc-table tbody"' in block, "应该只清表格的行容器"
+    assert '"#cy"' not in block, "清理名单里有图谱画布，cytoscape 实例会被拆掉"
+    # 名单里的选择器必须都能在页面上找到（写错 id 等于没清）
+    html = Path("web/index.html").read_text(encoding="utf-8")
+    for sel in re.findall(r'"#([A-Za-z0-9_-]+(?: [A-Za-z0-9_-]+)?)"', block):
+        first = sel.split(" ")[0]
+        assert f'id="{first}"' in html, f"清理名单里的 #{first} 在页面上不存在"
