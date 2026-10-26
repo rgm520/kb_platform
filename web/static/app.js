@@ -43,12 +43,50 @@ async function api(path, opts) {
 }
 
 /* ---------------------------------------------------------- 登录 */
+/* 换用户时必须清空"上一个用户的数据"所在容器。
+
+   共享电脑上：A 退出、B 登录后，A 刚才的提问、回答、引用片段、看板清单、
+   文件列表全都还留在 DOM 里 —— B 一进来就看得见。SPA 换用户只切显隐，
+   所以这里要显式清空（清单化是为了能测试、也免得以后漏）。 */
+const USER_SCOPED_CONTAINERS = [
+  "#a-answer", "#a-cites", "#a-q", "#a-notice", "#a-feedback",  // AI 问答：上一个人的提问与回答
+  "#stat-cards", "#doc-table-wrap", "#doc-stats", "#doc-total",  // 文档看板
+  "#fm-list", "#fm-icons", "#fm-crumbs", "#fm-search-results",   // 文件页
+  "#fm-content-results", "#fm-preview", "#fm-ctx",
+  "#cy", "#g-list", "#g-side",                                  // 知识图谱
+  "#admin-body",                                                // 管理台
+];
+
+function clearUserScopedUI() {
+  USER_SCOPED_CONTAINERS.forEach((sel) => {
+    const el = $(sel);
+    if (!el) return;
+    const tag = el.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") {
+      if (el.type !== "checkbox" && el.type !== "radio") el.value = "";
+    } else {
+      el.innerHTML = "";
+    }
+  });
+  // 图谱画布是 cytoscape 实例，不是普通 DOM
+  if (state.cy) { try { state.cy.clear(); } catch (e) { /* 忽略 */ } }
+  // 状态里同样不能留上一个用户的数据
+  state.docs = { page: 1, size: 50, total: 0 };
+  state.duplicates = []; state.dupSel = {}; state.dupCollapsed = {};
+  state.adminUsers = []; state.tokenCounts = {};
+  state.scopeSelected = new Set();
+  state.contentSearch = [];
+  if (window.KB && KB.files && typeof KB.files.clear === "function") KB.files.clear();
+}
+
 function showLogin() {
+  clearUserScopedUI();
   $("#login").classList.remove("hidden");
   $("#main").classList.add("hidden");
   state.user = null;
 }
 function showMain(user) {
+  clearUserScopedUI();
   state.user = user; state.role = user.role;
   window.KB = window.KB || {}; window.KB.me = user;
   $("#login").classList.add("hidden");

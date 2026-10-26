@@ -465,10 +465,12 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
             c["download_url"] = f"/api/v1/documents/{h.document_id}/download"
             citations.append(c)
 
-        if token_prefix:
-            audit(audit_uid if audit_uid is not None else user_id,
-                  token_prefix, "query", req.question,
-                  [h.file_path for h in hits], used.model_id, restricted, ip)
+        # 审计：Web 会话（没有 token）也要记，并归属到提问的人 ——
+        # 早先只在有 token 时才记，导致浏览器里问的问题查不到，
+        # 「每个用户的提问记录」也就无从隔离/审计了。
+        audit(audit_uid if audit_uid is not None else user_id,
+              token_prefix or "session", "query", req.question,
+              [h.file_path for h in hits], used.model_id, restricted, ip)
 
         resp = {"answer": text, "citations": citations,
                 "model_used": used.model_id, "model_requested": requested.model_id,

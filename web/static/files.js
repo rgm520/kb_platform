@@ -1041,10 +1041,20 @@ window.KB = window.KB || {};
     }
   }
 
+  /** 换用户时清空文件页的状态（上一个用户的目录、条目、选中项、搜索结果）。 */
+  const clear = () => {
+    state.sourceId = null; state.sourceName = ""; state.rel = "";
+    state.entries = []; state.byRel.clear(); state.viewOrder = [];
+    state.collapsed = new Set(); state.canWrite = false;
+    state.selected = new Set(); state.lastRel = "";
+    state.search = []; state.searchIndex = -1; state.ctxEntry = null;
+    state.contentSearch = [];
+  };
+
   KB.files = {
     load, open, openAt, refresh: () => open(state.sourceId, state.rel),
     preview, closePreview, upload, deleteSelected,
-    searchContent,
+    searchContent, clear,
     getState: () => state,
   };
   KB.trash = { load: trashLoad, restore: trashRestore, purge: trashPurge };
