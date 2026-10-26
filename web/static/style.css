@@ -30,9 +30,10 @@ button.sm{padding:4px 9px;font-size:12px}
 .topbar{display:flex;align-items:center;gap:24px;padding:0 20px;height:52px;
   background:var(--panel);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:20}
 .brand{font-weight:700;letter-spacing:.5px}
-.topbar nav{display:flex;gap:4px;flex:1}
-.topbar nav a{color:var(--muted);text-decoration:none;padding:6px 12px;border-radius:6px}
-.topbar nav a.active{background:var(--panel2);color:var(--fg)}
+.home-btn{display:inline-flex;align-items:center;gap:6px;color:var(--fg);
+  padding:5px 12px;border-radius:8px;border:1px solid var(--line)}
+.home-btn:hover{border-color:rgba(34,211,238,.45);color:var(--tech);background:rgba(34,211,238,.08)}
+.home-btn svg{width:16px;height:16px}
 .topbar .right{display:flex;align-items:center;gap:12px}
 
 /* 页面 */

@@ -131,6 +131,9 @@ $("#logout").addEventListener("click", async () => {
   showLogin();
 });
 
+/* ---------------------------------------------------------- 返回主菜单 */
+$("#btn-home").addEventListener("click", () => { location.hash = "#/desktop"; });
+
 /* ---------------------------------------------------------- 修改密码 */
 $("#btn-chpwd").addEventListener("click", () => {
   openModal(`<h3>修改密码</h3>
@@ -163,7 +166,9 @@ function route() {
   const h = (location.hash || "#/desktop").replace("#/", "");
   const p = ["desktop", "files", "trash", "board", "graph", "ask", "admin"].includes(h) ? h : "desktop";
   state.page = p;
-  $$("#nav a").forEach(a => a.classList.toggle("active", a.dataset.p === p));
+  // 顶部只留「返回主菜单」；在桌面上它自己就是主菜单，藏掉免得重复
+  const home = $("#btn-home");
+  if (home) home.classList.toggle("hidden", p === "desktop");
   $$(".page").forEach(s => s.classList.toggle("active", s.id === "p-" + p));
   if (p === "desktop") window.KB && KB.desktop && KB.desktop.mount();
   if (p === "files") window.KB && KB.files && KB.files.load();
