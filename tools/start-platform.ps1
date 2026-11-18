@@ -13,7 +13,7 @@
 param([switch]$Stop)
 
 $py = "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe"
-$root = "D:\kb-platform"
+$root = Split-Path -Parent $PSScriptRoot
 $logs = "$root\kb\logs"
 New-Item -ItemType Directory -Path $logs -Force | Out-Null
 
@@ -87,7 +87,7 @@ if ($alive) {
   Write-Host "知识库平台已启动" -ForegroundColor Green
   Write-Host "  监督进程 PID : $($p.Id)" -ForegroundColor Green
   Write-Host "  本机     : http://127.0.0.1:8000" -ForegroundColor Green
-  Write-Host "  局域网   : http://192.0.2.203:8000" -ForegroundColor Green
+  Write-Host "  局域网   : http://<本机IP>:8000" -ForegroundColor Green
   Write-Host "  日志     : $logs" -ForegroundColor Green
   Write-Host "  心跳     : $logs\supervisor-heartbeat.json" -ForegroundColor Green
 } else {

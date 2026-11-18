@@ -9,8 +9,11 @@ import secrets
 import sys
 
 from kbplatform import auth, models as models_mod
-from kbplatform.config import load_config
+from kbplatform.config import DEFAULT_CONFIG_PATH, load_config
 from kbplatform.db import init_db
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT_DB_PATH = os.path.join(_ROOT, "kb", "data", "kb.db")
 
 # 精确到子目录的涉密标记
 DEFAULT_RESTRICTED = [
@@ -33,8 +36,8 @@ ADMIN_USER = os.environ.get("KB_ADMIN_USER", "admin")
 ADMIN_PASSWORD = os.environ.get("KB_ADMIN_PASSWORD") or secrets.token_urlsafe(12)
 
 
-def seed(db_path: str = "D:/kb-platform/kb/data/kb.db",
-         config_path: str = "D:/kb-platform/config.toml",
+def seed(db_path: str = DEFAULT_DB_PATH,
+         config_path: str = DEFAULT_CONFIG_PATH,
          create_admin: bool = True) -> dict:
     conn = init_db(db_path)
     out = {}
@@ -77,5 +80,5 @@ def seed(db_path: str = "D:/kb-platform/kb/data/kb.db",
 
 if __name__ == "__main__":
     sys.stdout.reconfigure(encoding="utf-8")
-    cfg = load_config(sys.argv[1] if len(sys.argv) > 1 else "D:/kb-platform/config.toml")
+    cfg = load_config(sys.argv[1] if len(sys.argv) > 1 else DEFAULT_CONFIG_PATH)
     print(seed(cfg.db_path))

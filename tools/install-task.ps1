@@ -28,7 +28,7 @@ param(
 $TaskName = "OpenCode-KB-Platform"
 $WatchName = "OpenCode-KB-Watchdog"
 $BackupName = "OpenCode-KB-Backup"
-$root = "D:\kb-platform"
+$root = Split-Path -Parent $PSScriptRoot
 $logs = "$root\kb\logs"
 
 if ($Uninstall) {
@@ -243,6 +243,6 @@ if (-not $ok) {
 Write-Host ""
 Write-Host "平台已由计划任务托管" -ForegroundColor Green
 Write-Host "  本机   : http://127.0.0.1:8000" -ForegroundColor Green
-Write-Host "  局域网 : http://192.0.2.203:8000" -ForegroundColor Green
+Write-Host "  局域网 : http://<本机IP>:8000" -ForegroundColor Green
 Write-Host "  状态   : Get-ScheduledTask -TaskName $TaskName | Get-ScheduledTaskInfo" -ForegroundColor Green
 Write-Host "  日志   : $logs" -ForegroundColor Green

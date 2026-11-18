@@ -10,7 +10,7 @@
 #
 # 计划任务本身已经带 -WindowStyle Hidden，这里是第二道保险。
 
-$root = "D:\kb-platform"
+$root = Split-Path -Parent $PSScriptRoot
 $logs = "$root\kb\logs"
 New-Item -ItemType Directory -Path $logs -Force | Out-Null
 

@@ -9,7 +9,7 @@ from kbplatform import indexer
 from kbplatform import hashing
 from kbplatform import auth, extract as extract_mod
 from kbplatform import models as models_mod
-from kbplatform.config import Config
+from kbplatform.config import Config, DEFAULT_CONFIG_PATH
 from kbplatform.db import (init_db, purge_expired_trace_data, upsert_catalog,
                            bump_stats, checkpoint_wal)
 from kbplatform.jobs import JobQueue
@@ -257,7 +257,7 @@ if __name__ == "__main__":
     import sys
     sys.stdout.reconfigure(encoding="utf-8")
     from kbplatform.config import load_config
-    cfg_path = sys.argv[1] if len(sys.argv) > 1 else "D:/kb-platform/config.toml"
+    cfg_path = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_CONFIG_PATH
     p = Pipeline(load_config(cfg_path))
     if "--once" in sys.argv:
         print(p.run_once())

@@ -19,7 +19,8 @@ import urllib.request
 
 from kbplatform.feishu.bot import FeishuBot
 from kbplatform.feishu.client import FeishuClient
-from kbplatform.feishu.config import FeishuConfig, load_feishu_config
+from kbplatform.feishu.config import (DEFAULT_CONFIG_PATH, DEFAULT_WORKSPACE,
+                                      FeishuConfig, load_feishu_config)
 from kbplatform.feishu.identity import find_opencode_cli
 from kbplatform.feishu.kbcred import TokenStore
 from kbplatform.feishu.opencode import OpenCodeClient
@@ -282,7 +283,7 @@ def read_server_info(root: str) -> dict | None:
         return None
 
 
-def run_once(config_path: str = "D:/kb-platform/config.toml") -> FeishuBot | None:
+def run_once(config_path: str = DEFAULT_CONFIG_PATH) -> FeishuBot | None:
     """装配并启动机器人。返回 None 表示配置不足（调用方应当退出）。"""
     cfg = load_feishu_config(config_path)
     if cfg is None:
@@ -379,8 +380,8 @@ def setup_logging(log_dir: str | None = None) -> None:
 
 
 def main() -> int:
-    setup_logging(os.path.join("D:/kb-platform", "kb", "logs"))
-    config_path = sys.argv[1] if len(sys.argv) > 1 else "D:/kb-platform/config.toml"
+    setup_logging(os.path.join(DEFAULT_WORKSPACE, "kb", "logs"))
+    config_path = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_CONFIG_PATH
     try:
         bot = run_once(config_path)
     except Exception:

@@ -259,12 +259,12 @@ def _log(cfg, message: str) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    from kbplatform.config import load_config
+    from kbplatform.config import DEFAULT_CONFIG_PATH, load_config
     from kbplatform.paths import is_under_root
 
     ap = argparse.ArgumentParser(
         description="企业知识平台备份（SQLite 备份 API + 向量文件）")
-    ap.add_argument("--config", default="D:/kb-platform/config.toml")
+    ap.add_argument("--config", default=DEFAULT_CONFIG_PATH)
     ap.add_argument("--dest", default="", help="备份目录（默认本地盘 kb/backups）")
     ap.add_argument("--keep", type=int, default=7, help="保留最近几份（默认 7）")
     args = ap.parse_args(argv)

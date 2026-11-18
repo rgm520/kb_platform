@@ -1,7 +1,8 @@
 """飞书机器人配置装载。"""
 import pytest
 
-from kbplatform.feishu.config import (load_feishu_config, parse_model_ref)
+from kbplatform.feishu.config import (DEFAULT_WORKSPACE, load_feishu_config,
+                                      parse_model_ref)
 
 
 def test_parse_model_ref_splits_provider_and_model():
@@ -60,7 +61,7 @@ def test_defaults_match_spec(tmp_path, monkeypatch):
     monkeypatch.setenv("FEISHU_APP_SECRET", "s")
     (tmp_path / "config.toml").write_text("[feishu]\nenabled = true\n", encoding="utf-8")
     cfg = load_feishu_config(str(tmp_path / "config.toml"))
-    assert cfg.workspace == "D:/kb-platform"
+    assert cfg.workspace == DEFAULT_WORKSPACE
     assert cfg.opencode_port == 4599
     assert cfg.cloud_model == "opencode/minimax-m3.1-flash-free"
     assert cfg.local_model == "ollama/qwen3.5-9b-64k:latest"

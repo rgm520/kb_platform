@@ -14,7 +14,7 @@
 param([switch]$Uninstall)
 
 $TaskName = "OpenCode-Feishu-Bot"
-$root = "D:\kb-platform"
+$root = Split-Path -Parent $PSScriptRoot
 $logs = "$root\kb\logs"
 New-Item -ItemType Directory -Path $logs -Force | Out-Null
 

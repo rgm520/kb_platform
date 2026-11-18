@@ -8,7 +8,7 @@
   平台没有，于是掉了。
 
 用法：
-    python -m kbplatform.supervisor D:/kb-platform/config.toml
+    python -m kbplatform.supervisor config.toml
 
 进程模型：
     supervisor  (长驻，由计划任务拉起)
@@ -28,7 +28,7 @@ import time
 import urllib.error
 import urllib.request
 
-from kbplatform.config import load_config
+from kbplatform.config import DEFAULT_CONFIG_PATH, load_config
 
 HEALTH_URL = "http://127.0.0.1:8000/health"
 HEALTH_TIMEOUT = 15          # 8 秒太紧：服务正忙时一次探测就会误判失败
@@ -200,7 +200,7 @@ def acquire_single_instance_lock(lock_path: str):
 
 
 def main() -> int:
-    cfg_path = sys.argv[1] if len(sys.argv) > 1 else "D:/kb-platform/config.toml"
+    cfg_path = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_CONFIG_PATH
     cfg = load_config(cfg_path)
     root = os.path.dirname(os.path.abspath(cfg_path))
     log_dir = os.path.join(root, "kb", "logs")

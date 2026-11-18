@@ -18,7 +18,7 @@ param(
   [int]$Keep = 7
 )
 
-$root = "D:\kb-platform"
+$root = Split-Path -Parent $PSScriptRoot
 $pyBase = "$env:LOCALAPPDATA\Programs\Python\Python312"
 $py = "$pyBase\python.exe"
 

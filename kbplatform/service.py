@@ -30,7 +30,7 @@ from kbplatform import grants as grants_mod
 from kbplatform import hashing, shortcut
 from kbplatform import fs_service
 from kbplatform import graph_export
-from kbplatform.config import Config, load_config
+from kbplatform.config import Config, DEFAULT_CONFIG_PATH, load_config
 from kbplatform.db import init_db, ThreadLocalConn, purge_expired_trace_data, write_with_retry
 from kbplatform.fs_service import provision_sources_from_config, register_fs_routes
 from kbplatform.retrieval import Retriever
@@ -175,7 +175,7 @@ class ChangePwdReq(BaseModel):
     new_password: str
 
 
-def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
+def make_app(config_path: str = DEFAULT_CONFIG_PATH) -> FastAPI:
     cfg = load_config(config_path)
     init_db(cfg.db_path)                      # 建表 + 补列（幂等）
     # 请求线程各自持有一条连接：共享一条连接时，别的线程 commit 会把

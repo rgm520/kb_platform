@@ -31,6 +31,9 @@ from kbplatform.feishu.opencode import OpenCodeError, session_env
 from kbplatform.feishu.routing import (build_permissions, pick_model,
                                        restricted_dirs)
 
+DEFAULT_WORKSPACE = os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))))
+
 log = logging.getLogger("feishu")
 
 DEDUP_MAX = 2000
@@ -87,7 +90,7 @@ def strip_mentions(text: str) -> str:
 
 
 def build_directive(restricted: list[str] | None = None,
-                    workspace: str = "D:/kb-platform") -> str:
+                    workspace: str = DEFAULT_WORKSPACE) -> str:
     """每条指令前面挂的使用说明。
 
     agent 需要知道：知识库怎么查、哪些目录不能直接读。

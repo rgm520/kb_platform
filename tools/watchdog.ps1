@@ -26,7 +26,7 @@
 
 param([switch]$SelfTest)
 
-$root = "D:\kb-platform"
+$root = Split-Path -Parent $PSScriptRoot
 $TaskName = "OpenCode-KB-Platform"
 $log = "$root\kb\logs\watchdog.log"
 $stateFile = "$root\kb\logs\watchdog-state.json"

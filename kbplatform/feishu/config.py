@@ -13,7 +13,11 @@ import os
 import tomllib
 from dataclasses import dataclass
 
-DEFAULT_CONFIG_PATH = "D:/kb-platform/config.toml"
+DEFAULT_CONFIG_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "config.toml")
+DEFAULT_WORKSPACE = os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))))
 DEFAULT_SECRETS_NAME = "secrets.toml"
 
 # 允许透传进 agent session 的环境变量白名单。
@@ -31,7 +35,7 @@ SESSION_ENV_ALLOWLIST = (
 class FeishuConfig:
     app_id: str = ""
     app_secret: str = ""
-    workspace: str = "D:/kb-platform"
+    workspace: str = DEFAULT_WORKSPACE
     opencode_port: int = 4599
     opencode_cli: str = ""
     cloud_model: str = "opencode/minimax-m3.1-flash-free"
@@ -94,7 +98,7 @@ def load_feishu_config(config_path: str = DEFAULT_CONFIG_PATH,
     return FeishuConfig(
         app_id=app_id,
         app_secret=app_secret,
-        workspace=str(raw.get("workspace", "D:/kb-platform")),
+        workspace=str(raw.get("workspace", DEFAULT_WORKSPACE)),
         opencode_port=int(raw.get("opencode_port", 4599)),
         opencode_cli=str(raw.get("opencode_cli", "")),
         cloud_model=str(raw.get("cloud_model", "opencode/minimax-m3.1-flash-free")),
