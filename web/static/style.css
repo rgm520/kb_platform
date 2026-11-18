@@ -10,6 +10,22 @@ body{margin:0;background:var(--bg);color:var(--fg);
 .muted{color:var(--muted)}
 .err{color:var(--err);min-height:20px;margin-top:8px}
 
+/* ------------------------------------------------------------ 滚动条 */
+/* 系统默认滚动条在深色界面里是一条浅灰粗条，很扎眼。统一换成细的深色圆角条：
+   Chromium 用伪元素（带 hover/active），Firefox 用标准属性。
+   新版 Chrome 也支持标准属性，一旦声明就会忽略伪元素样式，所以用 @supports
+   只给不支持 ::-webkit-scrollbar 的浏览器（Firefox）下发。 */
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:#2f3b47;border-radius:8px;
+  border:2px solid transparent;background-clip:content-box}
+::-webkit-scrollbar-thumb:hover{background:#415263;background-clip:content-box}
+::-webkit-scrollbar-thumb:active{background:#4a9eff;background-clip:content-box}
+::-webkit-scrollbar-corner{background:transparent}
+@supports not selector(::-webkit-scrollbar){
+  *{scrollbar-width:thin;scrollbar-color:#33414e transparent}
+}
+
 /* 登录 */
 .login-wrap{min-height:100vh;display:grid;place-items:center}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:28px}
@@ -114,9 +130,16 @@ tr:hover td{background:#1a212a}
 input.inline{width:auto;min-width:120px}
 
 /* 弹窗 / toast */
-.modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:grid;place-items:center;z-index:50}
-.modal-card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px;min-width:380px;max-width:640px}
-.modal-foot{margin-top:14px;text-align:right}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:grid;place-items:center;z-index:50;
+  padding:20px;overflow:auto}
+/* 卡片限高 + 三段式（正文滚动、底部按钮常驻）：
+   文档详情的知识点可能几百条，不限高会把卡片撑到几千像素，
+   关闭按钮跑到屏幕外、遮罩又挡住页面，用户既滚不动也翻不了页。 */
+.modal-card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px;
+  min-width:380px;max-width:640px;max-height:calc(100vh - 40px);
+  display:flex;flex-direction:column;overflow:hidden}
+#modal-body{overflow-y:auto;min-height:0}
+.modal-foot{margin-top:14px;text-align:right;flex:0 0 auto}
 .toast{position:fixed;right:20px;bottom:20px;background:var(--panel2);border:1px solid var(--line);
   border-radius:8px;padding:10px 16px;z-index:60;max-width:420px}
 code{background:var(--panel2);padding:1px 5px;border-radius:4px;font-size:12px}

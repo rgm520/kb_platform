@@ -71,11 +71,8 @@ def _format_citations(cites: list) -> str:
     for i, c in enumerate(cites, 1):
         name = c.get("file") or "?"
         loc = c.get("locator") or ""
-        if c.get("restricted"):
-            lines.append(f"[{i}] {name} {loc} —— 该片段涉密，未回传原文".rstrip())
-        else:
-            snip = (c.get("snippet") or "").replace("\n", " ").strip()
-            lines.append(f"[{i}] {name} {loc}".rstrip() + (f" —— {snip}" if snip else ""))
+        snip = (c.get("snippet") or "").replace("\n", " ").strip()
+        lines.append(f"[{i}] {name} {loc}".rstrip() + (f" —— {snip}" if snip else ""))
     return "\n".join(lines)
 
 
@@ -84,11 +81,8 @@ def _format_search(results: list) -> str:
     for i, r in enumerate(results, 1):
         name = r.get("file") or "?"
         loc = r.get("locator") or ""
-        if r.get("restricted"):
-            lines.append(f"[{i}] {name} {loc} —— 该片段涉密，未回传原文".rstrip())
-        else:
-            snip = (r.get("snippet") or "").replace("\n", " ").strip()
-            lines.append(f"[{i}] {name} {loc}".rstrip() + (f" —— {snip}" if snip else ""))
+        snip = (r.get("snippet") or "").replace("\n", " ").strip()
+        lines.append(f"[{i}] {name} {loc}".rstrip() + (f" —— {snip}" if snip else ""))
     return "\n".join(lines)
 
 
@@ -153,9 +147,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "query":
         answer = obj.get("answer") or ""
         print(answer)
-        notice = obj.get("restricted_notice")
-        if notice:
-            print(f"\n（{notice}）")
         cites = obj.get("citations") or []
         if cites:
             print("\n引用：")

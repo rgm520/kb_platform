@@ -1,0 +1,47 @@
+# 知识平台配置示例。复制为 config.toml 后按实际环境修改。
+# config.toml 已在 .gitignore 中（含会话密钥与内网路径，不要提交）。
+
+[monitor]
+# 要监控的 NAS 共享；Windows UNC 路径在 TOML 里用双反斜杠
+roots = ["\\\\NAS_HOST\\share\\AI知识库"]
+poll_interval_sec = 60
+scan_qps = 20
+
+[paths]
+data_dir = "D:/kb-platform/kb/data"
+
+[drives]
+# 盘符 -> UNC 映射（文件页按盘符展示）
+"W:" = "\\\\NAS_HOST\\share"
+
+[shares]
+# NAS 上的共享清单，授权目录选择器用它列出可选根目录，顺序即界面顺序
+names = ["信息化管理"]
+
+[runtime]
+max_workers = 1
+
+[feishu]
+# 凭据放在 secrets.toml（或环境变量 FEISHU_APP_ID / FEISHU_APP_SECRET），不要写在这里
+enabled            = false
+workspace          = "D:/kb-platform"
+opencode_port      = 4599
+opencode_cli       = ""
+cloud_model        = "opencode/minimax-m3.1-flash-free"
+local_model        = "ollama/qwen3.5-9b-64k:latest"
+kb_api_base        = "http://127.0.0.1:8000"
+max_concurrent_cloud = 3
+max_concurrent_local = 1
+reply_chunk        = 3000
+agent_timeout_sec  = 600
+
+[models]
+# Tier 2（知识提炼）跳过的文件类型：表格按行切块，行数据对问答价值低
+extract_skip_exts = [".xlsx", ".xls", ".xlsm"]
+
+[security]
+# 会话签名密钥。生成方式：
+#   python -c "import secrets; print(secrets.token_hex(32))"
+session_secret = "CHANGE_ME"
+# 对外访问地址（内网），API 手册与调用示例用它
+public_base_url = "http://<server-ip>:8000"

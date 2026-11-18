@@ -5,9 +5,9 @@
 找不到文件。本文件锁住两件事：
   1. 文件页要有全文搜索的入口（「搜正文」开关 + 结果容器），
      files.js 要导出 KB.files.searchContent(query) -> Promise<Array>；
-  2. /api/v1/search 返回 chunk 级 snippet/score/matched_by，涉密片段
-     必须置空（前端照空显示"涉密·原文不回传"），没授权的用户搜不到
-     范围外的目录（grants 是唯一授权源，前端不做二次过滤）。
+  2. /api/v1/search 返回 chunk 级 snippet/score/matched_by；涉密目录只作
+     标记，片段照常返回（2026-11-11 放开）；没授权的用户搜不到范围外的
+     目录（grants 是唯一授权源，前端不做二次过滤）。
 """
 from __future__ import annotations
 
@@ -36,12 +36,12 @@ def test_file_page_has_content_search_markers():
     assert "搜正文" in html
 
 
-def test_files_js_exports_search_content_and_masks_restricted():
+def test_files_js_exports_search_content():
     js = (WEB / "static" / "files.js").read_text(encoding="utf-8")
     assert "searchContent" in js, "files.js 要导出 KB.files.searchContent"
     assert "/api/v1/search" in js, "全文搜索要打 POST /api/v1/search"
     assert "fm-content-results" in js, "结果要渲染进 #fm-content-results"
-    assert "涉密·原文不回传" in js, "涉密片段要照后端口径显示"
+    assert "涉密·原文不回传" not in js, "涉密片段已放开，不应再有占位标签"
     assert "openAt" in js, "点击结果要复用 openAt/pendingAt 交接定位"
 
 
@@ -103,8 +103,8 @@ def test_search_api_returns_snippets(app):
     assert hit["locator"] == "第1节"
 
 
-def test_restricted_chunk_snippet_is_masked(app):
-    """涉密目录：只返回「命中了」，片段必须置空——前端照空显示。"""
+def test_restricted_chunk_snippet_is_returned(app):
+    """涉密目录只作标记：片段原文照常返回，前端直接显示。"""
     conn = app.state.conn
     conn.execute(
         "INSERT INTO dir_scopes(share,subpath,restricted,label) VALUES(?,?,1,'涉密') "
@@ -115,10 +115,25 @@ def test_restricted_chunk_snippet_is_masked(app):
     r = c.post("/api/v1/search", json={"query": "预算管理", "top_k": 5})
     assert r.status_code == 200, r.text
     hits = r.json()["results"]
-    assert hits, f"涉密目录仍应给出有命中这一信息：{r.json()}"
+    assert hits, f"涉密目录仍应给出命中：{r.json()}"
     hit = hits[0]
-    assert hit["restricted"] is True
-    assert hit["snippet"] == "", "涉密片段后端必须置空，前端照空显示"
+    assert hit["restricted"] is True, "标记仍要保留（审计用）"
+    assert "预算" in hit["snippet"], f"涉密片段也要回传原文，实际 {hit}"
+
+
+def test_restricted_document_content_is_available(app):
+    """涉密标记不再挡全文：/content 按普通文档返回。"""
+    conn = app.state.conn
+    conn.execute(
+        "INSERT INTO dir_scopes(share,subpath,restricted,label) VALUES(?,?,1,'涉密') "
+        "ON CONFLICT(share,subpath) DO UPDATE SET restricted=1",
+        (SHARE, "制度"))
+    conn.commit()
+    c = _login(app)
+    doc_id = conn.execute("SELECT id FROM catalog").fetchone()[0]
+    r = c.get(f"/api/v1/documents/{doc_id}/content")
+    assert r.status_code == 200, r.text
+    assert "预算管理细则" in r.json()["text"]
 
 
 def test_user_without_grants_cannot_search_content(app):

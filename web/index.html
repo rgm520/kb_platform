@@ -320,14 +320,11 @@
         </span>
         <button id="g-fit" title="把全部节点缩放到可视范围">适应窗口</button>
         <button id="g-layout" title="按当前窗口大小重新排布节点">重新布局</button>
-        <label class="chk"><input type="checkbox" id="g-entity" checked>实体</label>
-        <label class="chk"><input type="checkbox" id="g-kp" checked>知识点</label>
-        <label class="chk"><input type="checkbox" id="g-cat" checked>分类</label>
-        <label class="chk"><input type="checkbox" id="g-rel-label">关系文字</label>
-        <span class="muted">点击节点展开邻居</span>
+        <span class="muted">点击节点查看详情</span>
       </div>
       <div class="graph-wrap">
         <div id="cy"></div>
+        <aside id="g-panel" class="g-panel"></aside>
         <aside id="g-side"><p class="muted">选择左侧节点查看详情</p></aside>
       </div>
       <div id="g-list" class="g-list"></div>
@@ -380,6 +377,7 @@
 <div id="toast" class="toast hidden"></div>
 
 <script src="/static/vendor/cytoscape.min.js"></script>
+<script src="/static/graph-view.js"></script>
 <script src="/static/desktop.js"></script>
 <script src="/static/files.js"></script>
 <script src="/static/admin-sources.js"></script>

@@ -35,3 +35,55 @@ def test_frontend_js_parses(f: Path):
         col = getattr(e, "column", None)
         raise AssertionError(
             f"{f.name} 语法错误（行 {line} 列 {col}）：{e}") from e
+
+
+# ---------------------------------------------------------------- continue/break
+# esprima 只做语法解析，**不查**"continue 不在循环里"这种语义错误：
+#   nodes.forEach(() => { if (x) continue; })   ← 解析通过，运行直接 SyntaxError
+#   → 整个模块不加载，页面看着正常但功能全失灵（2026-10-26 图谱模块就是这样哑掉的）。
+# 所以这里拿 AST 自己走一遍：continue/break 必须处在**同一个函数内**的循环里。
+LOOPS = {"ForStatement", "WhileStatement", "DoWhileStatement",
+         "ForInStatement", "ForOfStatement", "LabeledStatement"}
+FUNCS = {"FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"}
+
+
+def _find_illegal_jumps(node, in_loop: int, problems: list, path: str = ""):
+    if isinstance(node, list):
+        for i, child in enumerate(node):
+            _find_illegal_jumps(child, in_loop, problems, path)
+        return
+    if not isinstance(node, dict):
+        return
+    t = node.get("type")
+    if t in ("ContinueStatement", "BreakStatement"):
+        if in_loop == 0:
+            problems.append((path, t, node.get("line")))
+        return
+    if t in FUNCS:
+        # 函数边界：里面的循环不算外层的
+        for key, val in node.items():
+            if key in ("type", "loc", "range"):
+                continue
+            _find_illegal_jumps(val, 0, problems, path + "/" + t)
+        return
+    if t in LOOPS:
+        for key, val in node.items():
+            if key in ("type", "loc", "range"):
+                continue
+            _find_illegal_jumps(val, in_loop + 1, problems, path + "/" + t)
+        return
+    for key, val in node.items():
+        if key in ("type", "loc", "range"):
+            continue
+        _find_illegal_jumps(val, in_loop, problems, path)
+
+
+@pytest.mark.parametrize("f", sorted(WEB.glob("*.js")), ids=lambda p: p.name)
+def test_frontend_no_continue_outside_loop(f: Path):
+    src = f.read_text(encoding="utf-8")
+    ast = esprima.parseScript(_normalize(src), tolerant=False)
+    problems: list = []
+    _find_illegal_jumps(ast, 0, problems)
+    assert not problems, (
+        f"{f.name} 里有 continue/break 不在同函数的循环内（运行时会直接 SyntaxError，"
+        f"整个模块不加载）：{problems}")

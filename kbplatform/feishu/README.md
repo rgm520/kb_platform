@@ -124,10 +124,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File D:\kb-platform\tools\install
 2. **agent 能读到 NAS 上的全部文件**（含涉密原文），因为盘符是持久映射。
    三层控制：
    - 框架级：session 权限规则 `external_directory: deny` 挡住文件工具读工作区外的路径；
-   - 通道级：知识库只经 `tools/kbq.py` 走 scope 过滤的 API，涉密片段不回传原文；
+   - 通道级：知识库只经 `tools/kbq.py` 走 scope 过滤的 API（涉密标记仅审计，不再屏蔽原文）；
    - 提示级：每条指令前挂的使用说明里列出禁读目录。
 3. **shell 的路径拦截是尽力而为**——opencode 官方文档明说目录推断是 best effort。
-   所以「涉密不出内网」的真正保证是第 2 条（不回传原文）+ 涉密用户走本地模型。
+   所以「涉密不出内网」的真正保证是第 2 条（agent 受目录权限约束）+ 涉密用户走本地模型。
 4. **应用密钥不进 agent**（session 环境变量走白名单，`FEISHU_APP_SECRET` 被挡掉）。
 5. **知识库 token 不进模型上下文**，只在 bot 进程内存 + `.feishu/tokens/<session>.token`。
 

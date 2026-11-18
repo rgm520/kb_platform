@@ -9,6 +9,8 @@ _probe/
 *.db-wal
 *.db-shm
 vectors/
+# 本机配置（含会话密钥与内网路径），提交 config.example.toml 即可
+config.toml
 
 # 飞书机器人的凭据与运行产物
 secrets.toml

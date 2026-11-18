@@ -123,3 +123,43 @@ console.log(JSON.stringify({byName, bySize, byTime, byExt, groups}));
     assert data["byExt"][1:] == ["c.pdf", "A.txt", "b.txt"]
     # 按名称分组：中文名按拼音首字母，英文按字母
     assert "A" in data["groups"] and "B" in data["groups"]
+
+
+def test_modal_card_is_height_capped_and_scrollable():
+    """看板详情弹窗：内容再长也不能顶出视口——卡片限高、正文内部滚动。
+
+    实测（2026-11-12）：知识点多的文档详情把 .modal-card 撑到 5599px（视口 886px），
+    卡片和「关闭」按钮都在屏幕外，页面又被 fixed 遮罩盖住，既滚不动也翻不了页。
+    """
+    import re
+
+    css = (WEB / "static" / "style.css").read_text(encoding="utf-8")
+    card = re.search(r"\.modal-card\{([^}]*)\}", css)
+    assert card, "找不到 .modal-card 规则"
+    rules = card.group(1).replace(" ", "").replace("\n", "")
+    assert "max-height:calc(100vh" in rules, "卡片必须限高，否则长内容会顶出视口"
+    assert "display:flex" in rules and "flex-direction:column" in rules, "卡片要能固定底部按钮"
+
+    body = re.search(r"#modal-body\{([^}]*)\}", css)
+    assert body, "#modal-body 要有自己的滚动规则"
+    body_rules = body.group(1).replace(" ", "").replace("\n", "")
+    assert "overflow-y:auto" in body_rules and "min-height:0" in body_rules, \
+        "弹窗正文要内部滚动，min-height:0 才能让 flex 子项真正滚动"
+
+    foot = re.search(r"\.modal-foot\{([^}]*)\}", css)
+    assert foot and "flex:00auto" in foot.group(1).replace(" ", ""), "底部按钮不能被正文挤走"
+
+
+def test_custom_scrollbar_is_themed():
+    """滚动条要跟深色主题一致，别用系统默认的浅灰粗条。
+
+    Chromium 走 ::-webkit-scrollbar 伪元素；Firefox 只认标准属性，
+    用 @supports 隔离，避免新版 Chrome 因同时声明标准属性而忽略伪元素样式。
+    """
+    css = (WEB / "static" / "style.css").read_text(encoding="utf-8")
+    assert "::-webkit-scrollbar{" in css.replace(" ", "")
+    assert "::-webkit-scrollbar-thumb{" in css.replace(" ", "")
+    assert "::-webkit-scrollbar-thumb:hover{" in css.replace(" ", "")
+    assert "scrollbar-width:thin" in css.replace(" ", "")
+    assert "scrollbar-color" in css
+    assert "@supports not selector(::-webkit-scrollbar)" in css

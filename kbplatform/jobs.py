@@ -55,22 +55,32 @@ class JobQueue:
 
         kind 过滤是必需的：Tier 1 完成后会立刻入队 Tier 2 的任务，
         若不按类型过滤，Tier 2 任务会被 Tier 1 的循环领走而跳过执行。
+
+        **必须是单条 UPDATE ... RETURNING**：Tier 2 现在是多线程消费
+        （每个池成员一个线程），「先 SELECT 再 UPDATE」会让两个线程同时
+        选中同一行，同一份文档被重复提炼（实测 200 个任务被领了 205 次）。
         """
+        cond = "state='queued'"
+        params: tuple = (time.time(),)
         if kind:
-            row = self.conn.execute(
-                "SELECT id, kind, catalog_id, state, error FROM jobs "
-                "WHERE state='queued' AND kind=? ORDER BY id LIMIT 1", (kind,)).fetchone()
-        else:
-            row = self.conn.execute(
-                "SELECT id, kind, catalog_id, state, error FROM jobs "
-                "WHERE state='queued' ORDER BY id LIMIT 1").fetchone()
+            cond += " AND kind=?"
+            params += (kind,)
+        cur = self.conn.execute(
+            f"UPDATE jobs SET state='running', started_at=?, attempts=attempts+1 "
+            f"WHERE id=(SELECT id FROM jobs WHERE {cond} ORDER BY id LIMIT 1) "
+            f"RETURNING id, kind, catalog_id, state, error", params)
+        row = cur.fetchone()
+        self.conn.commit()
         if not row:
             return None
-        self.conn.execute(
-            "UPDATE jobs SET state='running', started_at=?, attempts=attempts+1 WHERE id=?",
-            (time.time(), row[0]))
-        self.conn.commit()
         return Job(row[0], row[1], row[2], row[3], row[4])
+
+    def release(self, job_id: int) -> None:
+        """把领到但还没开始做的任务原样放回队列（例如算力池暂无空闲成员）。"""
+        self.conn.execute(
+            "UPDATE jobs SET state='queued', started_at=NULL WHERE id=? AND state='running'",
+            (job_id,))
+        self.conn.commit()
 
     def finish(self, job_id: int, error: str | None = None) -> None:
         if error:

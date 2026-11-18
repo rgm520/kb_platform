@@ -24,6 +24,16 @@ from kbplatform.scopes import (load_scopes, load_restricted, restricted_predicat
 from kbplatform.vectors import VectorStore
 
 
+# 一批 IN (...) 的 id 数。SQLite 的绑定变量上限是 32766（老版本 999），
+# 400 个 id 在 src IN / dst IN 里各出现一次也只有 800 个占位符，足够安全。
+_GRAPH_BATCH = 400
+
+
+def _batches(ids, size: int = _GRAPH_BATCH):
+    for i in range(0, len(ids), size):
+        yield ids[i:i + size]
+
+
 @dataclass
 class Hit:
     chunk_id: int
@@ -96,30 +106,50 @@ class Retriever:
     def _graph(self, seed_ids: list[int], hops: int = 1, limit: int = 40) -> list[int]:
         if not seed_ids:
             return []
-        marks = ",".join("?" * len(seed_ids))
-        nodes = self.conn.execute(
-            f"SELECT DISTINCT src FROM edges WHERE chunk_id IN ({marks}) "
-            f"UNION SELECT DISTINCT dst FROM edges WHERE chunk_id IN ({marks})",
-            seed_ids + seed_ids).fetchall()
-        node_ids = [r[0] for r in nodes]
+        # SQLite 的绑定变量上限是 32766；宽泛问题（如「人力有哪些流程」）能从
+        # 几十个种子扩出上万个邻居，一次性拼 `IN (...)` 会
+        #     OperationalError: too many SQL variables
+        # 让 /api/v1/query 直接 500（用户看到「提问失败」），所以按批查、再合并。
+        node_ids: list[int] = []
+        for part in _batches(seed_ids):
+            marks = ",".join("?" * len(part))
+            rows = self.conn.execute(
+                f"SELECT DISTINCT src FROM edges WHERE chunk_id IN ({marks}) "
+                f"UNION SELECT DISTINCT dst FROM edges WHERE chunk_id IN ({marks})",
+                part + part).fetchall()
+            node_ids.extend(r[0] for r in rows)
+        node_ids = list(dict.fromkeys(node_ids))
         if not node_ids:
             return []
-        nm = ",".join("?" * len(node_ids))
-        nbrs = self.conn.execute(
-            f"""SELECT DISTINCT src FROM edges WHERE dst IN ({nm})
-                UNION SELECT DISTINCT dst FROM edges WHERE src IN ({nm})""",
-            node_ids + node_ids).fetchall()
-        nbr_ids = [r[0] for r in nbrs if r[0] not in set(node_ids)]
+        node_set = set(node_ids)
+        nbr_ids: list[int] = []
+        for part in _batches(node_ids):
+            marks = ",".join("?" * len(part))
+            rows = self.conn.execute(
+                f"""SELECT DISTINCT src FROM edges WHERE dst IN ({marks})
+                    UNION SELECT DISTINCT dst FROM edges WHERE src IN ({marks})""",
+                part + part).fetchall()
+            nbr_ids.extend(r[0] for r in rows if r[0] not in node_set)
+        nbr_ids = list(dict.fromkeys(nbr_ids))
         if not nbr_ids:
             return []
-        bm = ",".join("?" * len(nbr_ids))
-        # {bm} 在 SQL 里出现两次（src IN / dst IN），参数也必须给两遍，
-        # 否则 sqlite 报 "Incorrect number of bindings supplied"（曾导致 /query 随机 500）。
-        rows = self.conn.execute(
-            f"""SELECT DISTINCT chunk_id FROM edges
-                WHERE chunk_id IS NOT NULL AND (src IN ({bm}) OR dst IN ({bm}))
-                LIMIT ?""", nbr_ids + nbr_ids + [limit]).fetchall()
-        return [r[0] for r in rows]
+        out: list[int] = []
+        seen: set[int] = set()
+        for part in _batches(nbr_ids):
+            marks = ",".join("?" * len(part))
+            # {marks} 在 SQL 里出现两次（src IN / dst IN），参数也必须给两遍，
+            # 否则 sqlite 报 "Incorrect number of bindings supplied"（曾导致 /query 随机 500）。
+            rows = self.conn.execute(
+                f"""SELECT DISTINCT chunk_id FROM edges
+                    WHERE chunk_id IS NOT NULL AND (src IN ({marks}) OR dst IN ({marks}))
+                    LIMIT ?""", part + part + [limit - len(out)]).fetchall()
+            for r in rows:
+                if r[0] not in seen:
+                    seen.add(r[0])
+                    out.append(r[0])
+            if len(out) >= limit:
+                break
+        return out[:limit]
 
     def _allowed_paths(self, user_id: int | None) -> set[tuple[str, str]] | None:
         """返回允许的 (share, rel_path) 集合。None 表示不限制（管理员/内部调用）。

@@ -16,6 +16,11 @@ from typing import Iterable
 
 import numpy as np
 
+# 分块扫描的行数。16384 × 1024 × 4B ≈ 64MB 峰值——
+# 68.8 万块时把整张 fp16 矩阵一次转成 fp32 要 2.6GB，2026-11-11
+# 直接把 Web 进程打成 MemoryError，/api/v1/query 全线 500。
+SCAN_BLOCK = 16384
+
 
 class VectorStore:
     def __init__(self, dirpath: str, dim: int = 1024):
@@ -76,39 +81,49 @@ class VectorStore:
         self._save_ids()
 
     # ------------------------------------------------------------ 读取
-    def _matrix(self) -> np.ndarray:
-        n = len(self._ids)
+    def _scores(self, qv: np.ndarray, n: int) -> np.ndarray:
+        """分块算余弦相似度，绝不物化整张 fp32 矩阵。"""
+        sims = np.zeros(n, dtype=np.float32)
         if n == 0 or not self.vec_path.exists():
-            return np.zeros((0, self.dim), dtype=np.float32)
-        expect = n * self.dim * 2
-        actual = os.path.getsize(self.vec_path)
-        if actual < expect:
-            # 文件被截断：只取完整行
-            n = actual // (self.dim * 2)
-        if n == 0:
-            return np.zeros((0, self.dim), dtype=np.float32)
-        return np.memmap(self.vec_path, dtype=np.float16, mode="r",
-                         shape=(n, self.dim)).astype(np.float32)
+            return sims
+        mm = np.memmap(self.vec_path, dtype=np.float16, mode="r",
+                       shape=(n, self.dim))
+        for start in range(0, n, SCAN_BLOCK):
+            block = np.asarray(mm[start:start + SCAN_BLOCK], dtype=np.float32)
+            norms = np.linalg.norm(block, axis=1)
+            norms[norms == 0] = 1.0
+            sims[start:start + block.shape[0]] = (block @ qv) / norms
+        return sims
 
     def search(self, q: list[float], topk: int = 20) -> list[tuple[int, float]]:
         """返回 [(chunk_id, 余弦相似度)]，按相似度降序。"""
         self._refresh()
-        M = self._matrix()
-        if M.size == 0:
+        n = len(self._ids)
+        if n == 0 or not self.vec_path.exists():
+            return []
+        # 文件被截断时只取完整行
+        n = min(n, os.path.getsize(self.vec_path) // (self.dim * 2))
+        if n == 0:
             return []
         qv = np.asarray(q, dtype=np.float32).reshape(-1)
         if qv.shape[0] != self.dim:
             raise ValueError(f"查询维度应为 {self.dim}，实际 {qv.shape[0]}")
-        n = np.linalg.norm(qv)
-        if n == 0:
+        norm = np.linalg.norm(qv)
+        if norm == 0:
             return []
-        qv = qv / n
-        norms = np.linalg.norm(M, axis=1, keepdims=True)
-        norms[norms == 0] = 1.0
-        sims = (M / norms) @ qv
-        live = [(i, self._ids[i]) for i in range(len(self._ids)) if self._ids[i] >= 0]
-        live.sort(key=lambda x: -float(sims[x[0]]))
-        return [(cid, float(sims[row])) for row, cid in live[:topk]]
+        qv = qv / norm
+
+        sims = self._scores(qv, n)
+        ids = np.asarray(self._ids[:n], dtype=np.int64)
+        live = np.flatnonzero(ids >= 0)
+        if live.size == 0:
+            return []
+        live_sims = sims[live]
+        k = min(topk, live.size)
+        # argpartition 只挑候选，避免给 68 万行建 tuple 列表再全量排序
+        cand = np.argpartition(-live_sims, k - 1)[:k]
+        cand = cand[np.argsort(-live_sims[cand], kind="stable")]
+        return [(int(ids[live[i]]), float(live_sims[i])) for i in cand]
 
     def remove(self, ids: Iterable[int]) -> None:
         self._refresh()

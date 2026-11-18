@@ -327,3 +327,19 @@ def test_trace_write_failure_does_not_break_query(app):
     app.state.conn.commit()
     resp = _do_query(c)
     assert resp.get("request_id"), "轨迹写失败时问答必须正常返回"
+
+
+def test_restricted_citation_returns_snippet_without_notice(app):
+    """涉密目录只作标记：问答引用照常给片段原文，也不再返回提示语。"""
+    conn = app.state.conn
+    conn.execute("INSERT INTO dir_scopes(share,subpath,restricted,label) "
+                 "VALUES('share','',1,'涉密')")
+    conn.commit()
+    c = _login(app)
+    resp = _do_query(c)
+    assert resp["restricted"] is True, "标记仍要保留（审计用）"
+    assert "restricted_notice" not in resp, "已放开，不应再有提示语"
+    cites = resp["citations"]
+    assert cites, "应有引用片段"
+    assert cites[0]["restricted"] is True
+    assert cites[0]["snippet"], "涉密片段也要回传原文"

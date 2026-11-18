@@ -10,8 +10,10 @@ from kbplatform import hashing
 from kbplatform import auth, extract as extract_mod
 from kbplatform import models as models_mod
 from kbplatform.config import Config
-from kbplatform.db import init_db, purge_expired_trace_data, upsert_catalog, bump_stats
+from kbplatform.db import (init_db, purge_expired_trace_data, upsert_catalog,
+                           bump_stats, checkpoint_wal)
 from kbplatform.jobs import JobQueue
+from kbplatform.extract_runner import ExtractRunner
 from kbplatform.monitor import Monitor
 from kbplatform.paths import is_under_root
 from kbplatform.vectors import VectorStore
@@ -39,6 +41,11 @@ class Pipeline:
                                poll_interval=config.poll_interval_sec)
         # 解析算力池：本地 + 远端多个大模型，按权重调度
         self.pool = models_mod.ParsePool(self.conn)
+        # Tier 2 提炼的并发执行器：索引队列再长，提炼也照常出发
+        # （2026-11-11 事故：Tier 1 抽干队列才轮到 Tier 2，提炼饿死两天）。
+        self.runner = ExtractRunner(config.db_path, self.pool,
+                                    skip_exts=config.extract_skip_exts,
+                                    log=lambda msg: print(msg, flush=True))
         self._warm_snapshot()
         self._reconcile_pending()
 
@@ -134,7 +141,7 @@ class Pipeline:
                 job = self.queue.claim("index_ocr")
             if job is None:
                 break
-            row = self.conn.execute("SELECT path FROM catalog WHERE id=?",
+            row = self.conn.execute("SELECT path, ext FROM catalog WHERE id=?",
                                      (job.catalog_id,)).fetchone()
             if row:
                 res = indexer.index_file(self.conn, self.cfg.fts_path, self.vs,
@@ -142,33 +149,42 @@ class Pipeline:
                                          embed_model=self.cfg.embed_model)
                 if res.ok:
                     stats["indexed"] += 1
-                    self.queue.enqueue("extract", job.catalog_id)
+                    # 表格类只索引不提炼（块数占全局 81%，行数据对问答价值低）
+                    if not extract_mod.is_skipped_ext(row[1], self.cfg.extract_skip_exts):
+                        self.queue.enqueue("extract", job.catalog_id)
                 else:
                     stats["failed"] += 1
             self.queue.finish(job.id)
 
         # 5) 执行 Tier 2（只领 extract 任务）
-        while True:
-            job = self.queue.claim("extract")
-            if job is None:
-                break
-            row = self.conn.execute("SELECT path FROM catalog WHERE id=?",
-                                     (job.catalog_id,)).fetchone()
-            if row:
-                chunk_ids = [r[0] for r in self.conn.execute(
-                    "SELECT id FROM chunks WHERE file_path=?", (row[0],)).fetchall()]
-                # 有可用池成员就走算力池（本地+远端分担）；池空则退回单模型
-                if self.pool.members():
-                    res = extract_mod.extract_file(self.conn, job.catalog_id, row[0],
-                                                   chunk_ids, model="", pool=self.pool)
-                else:
-                    res = extract_mod.extract_file(self.conn, job.catalog_id, row[0],
-                                                   chunk_ids, model=self.cfg.llm_model)
-                if res.ok:
-                    stats["extracted"] += 1
-                else:
-                    stats["failed"] += 1
-            self.queue.finish(job.id)
+        #    常驻运行时提炼由 ExtractRunner 的后台线程并发消费（见 run_forever）；
+        #    只有 `--once` / 单测这种没有后台线程的场景才在这里同步做一轮。
+        if not self.runner.running():
+            while True:
+                job = self.queue.claim("extract")
+                if job is None:
+                    break
+                row = self.conn.execute("SELECT path, ext FROM catalog WHERE id=?",
+                                         (job.catalog_id,)).fetchone()
+                if row:
+                    if extract_mod.is_skipped_ext(row[1], self.cfg.extract_skip_exts):
+                        extract_mod.mark_extract_skipped(self.conn, job.catalog_id)
+                        stats["skipped"] = stats.get("skipped", 0) + 1
+                    else:
+                        chunk_ids = [r[0] for r in self.conn.execute(
+                            "SELECT id FROM chunks WHERE file_path=?", (row[0],)).fetchall()]
+                        # 有可用池成员就走算力池（本地+远端分担）；池空则退回单模型
+                        if self.pool.members():
+                            res = extract_mod.extract_file(self.conn, job.catalog_id, row[0],
+                                                           chunk_ids, model="", pool=self.pool)
+                        else:
+                            res = extract_mod.extract_file(self.conn, job.catalog_id, row[0],
+                                                           chunk_ids, model=self.cfg.llm_model)
+                        if res.ok:
+                            stats["extracted"] += 1
+                        else:
+                            stats["failed"] += 1
+                self.queue.finish(job.id)
 
         stats["pending"] = self.queue.pending_count()
 
@@ -204,14 +220,37 @@ class Pipeline:
     def run_forever(self) -> None:
         print(f"[pipeline] 开始监控 {self.cfg.monitor_roots} "
               f"（每 {self.cfg.poll_interval_sec}s 一轮）", flush=True)
-        while True:
-            try:
-                stats = self.run_once()
-                if stats["indexed"] or stats["extracted"] or stats["removed"]:
-                    print(f"[pipeline] {stats}", flush=True)
-            except Exception as e:
-                print(f"[pipeline] 本轮失败: {type(e).__name__}: {e}", flush=True)
-            time.sleep(self.cfg.poll_interval_sec)
+        self.runner.start()
+        try:
+            while True:
+                try:
+                    stats = self.run_once()
+                    done = self.runner.take()
+                    stats["extracted"] += done["extracted"]
+                    stats["failed"] += done["failed"]
+                    if done["skipped"]:
+                        stats["skipped"] = stats.get("skipped", 0) + done["skipped"]
+                    if (stats["indexed"] or stats["extracted"] or stats["removed"]
+                            or stats.get("skipped")):
+                        print(f"[pipeline] {stats}", flush=True)
+                except Exception as e:
+                    print(f"[pipeline] 本轮失败: {type(e).__name__}: {e}", flush=True)
+                    # 本轮异常可能把连接留在未提交事务里，读快照会钉住 WAL，
+                    # 和提炼线程同样处理：先回滚，再进下一轮。
+                    try:
+                        self.conn.rollback()
+                    except Exception:
+                        pass
+                # WAL 兜底：超过阈值主动 checkpoint，避免 checkpoint 长期挨饿
+                # 把 WAL 堆到把磁盘写满（2026-11-17 故障）。
+                try:
+                    checkpoint_wal(self.conn, self.cfg.db_path)
+                except Exception as e:
+                    print(f"[pipeline] WAL checkpoint 异常: {type(e).__name__}: {e}",
+                          flush=True)
+                time.sleep(self.cfg.poll_interval_sec)
+        finally:
+            self.runner.stop()
 
 
 if __name__ == "__main__":

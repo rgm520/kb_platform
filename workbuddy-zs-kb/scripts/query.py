@@ -6,8 +6,12 @@
     python query.py "问题" --model 1 --include-text --json
 
 环境变量：
-    ZB_KB_BASE_URL  知识库服务地址
+    ZB_KB_BASE_URL  知识库服务地址（带不带 /api/v1 都行）
     ZB_KB_TOKEN     API 密钥
+
+片段原文默认**不打印**：它是公司内部原文，打印出来会随工具输出进
+agent 的上下文，agent 用外部模型时等于把原文送出了内网
+（SKILL.md 铁律 6）。真要原文时加 --with-snippet。
 """
 import argparse
 import json
@@ -49,21 +53,54 @@ def call(base: str, token: str, path: str, body=None, timeout: int = 300):
         sys.exit(3)
 
 
+def api_base(base: str) -> str:
+    """把 base 归一成**服务根**。
+
+    两种写法都在流通：手册（SKILL.md 与管理员下载的 API 手册）让设
+    `http://host:8000/api/v1`，而 `docs/接入说明.md` / `README.md` 写的是
+    `http://host:8000`。本脚本自己会拼 `/api/v1/query`，所以这里必须先把
+    末尾的 `/api/v1` 去掉 —— 否则照手册设就会打到 `/api/v1/api/v1/query`，
+    落到 SPA 兜底路由上返回 405（不是 404，更难猜）。
+    """
+    b = (base or "").strip().rstrip("/")
+    if b.lower().endswith("/api/v1"):
+        b = b[: -len("/api/v1")]
+    return b
+
+
+def strip_snippets(citations: list) -> list:
+    """清掉片段原文，只留出处元信息。
+
+    snippet / text 都是公司内部原文，默认不带出去（SKILL.md 铁律 6）。
+    """
+    out = []
+    for c in citations or []:
+        d = dict(c)
+        d["snippet"] = ""
+        d["text"] = None
+        out.append(d)
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("question")
     ap.add_argument("--model", default="auto", help="模型 id / 名称 / auto")
     ap.add_argument("--top-k", type=int, default=8)
-    ap.add_argument("--include-text", action="store_true", help="带回片段全文（涉密内容不会被回传）")
+    ap.add_argument("--include-text", action="store_true", help="带回片段全文")
+    ap.add_argument("--with-snippet", action="store_true",
+                    help="同时打印片段原文（默认不打印，避免内部原文进 agent 上下文）")
     ap.add_argument("--json", action="store_true", help="只输出原始 JSON")
     a = ap.parse_args()
 
-    base = os.environ.get("ZB_KB_BASE_URL", "").strip()
+    raw_base = os.environ.get("ZB_KB_BASE_URL", "").strip()
     token = os.environ.get("ZB_KB_TOKEN", "").strip()
-    if not base or not token:
+    if not raw_base or not token:
         print("[知识库] 缺少 ZB_KB_BASE_URL 或 ZB_KB_TOKEN 环境变量。"
               "请联系管理员获取服务地址与 API 密钥。", file=sys.stderr)
         sys.exit(4)
+
+    base = api_base(raw_base)
 
     r = call(base, token, "/api/v1/query", {
         "question": a.question,
@@ -71,6 +108,9 @@ def main():
         "top_k": a.top_k,
         "include_text": a.include_text,
     })
+
+    if not a.with_snippet:
+        r["citations"] = strip_snippets(r.get("citations") or [])
 
     if a.json:
         print(json.dumps(r, ensure_ascii=False, indent=2))
@@ -82,16 +122,11 @@ def main():
     if cits:
         print("--- 出处 ---")
         for i, c in enumerate(cits, 1):
-            tag = " [涉密·原文未回传]" if c.get("restricted") else ""
-            print(f"[片段{i}] {c.get('file','')}  位置 {c.get('locator','')}{tag}")
+            print(f"[片段{i}] {c.get('file','')}  位置 {c.get('locator','')}")
             if c.get("snippet"):
                 print("    " + c["snippet"].replace("\n", " ")[:160])
     else:
         print("（未检索到相关文档片段）")
-    if r.get("restricted"):
-        print()
-        print("[注意] 本次回答命中内部受限目录，平台已锁定本地模型并未回传原文；"
-              "请登录知识库平台查看原文。")
     if r.get("model_switched"):
         print(f"[注意] 原请求模型 {r.get('model_requested')} 因涉密已自动切换为 "
               f"{r.get('model_used')}。")

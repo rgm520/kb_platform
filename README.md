@@ -254,9 +254,13 @@ workbuddy-zs-kb/
 配置两个环境变量后即可用：
 
 ```powershell
-$env:ZB_KB_BASE_URL = "http://192.0.2.203:8000"
+$env:ZB_KB_BASE_URL = "http://192.0.2.203:8000/api/v1"
 $env:ZB_KB_TOKEN   = "kb_管理员签发的密钥"
 ```
+
+> `ZB_KB_BASE_URL` 带不带 `/api/v1` 都行：`scripts/query.py`、`scripts/search.py`
+> 会自己补 `/api/v1` 再拼接口路径（写成 `http://192.0.2.203:8000` 也能跑通）。
+> 脚本默认只打印出处、不打印片段原文；需要原文时加 `--with-snippet`。
 
 详见 `docs/接入说明.md`。
 

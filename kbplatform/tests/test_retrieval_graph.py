@@ -49,3 +49,26 @@ def test_graph_multiple_neighbours(tmp_path):
     conn.commit()
     out = Retriever._graph(_Fake(conn), [1])
     assert set(range(100, 109)).issubset(set(out)), f"应召回 9 个邻居 chunk，实际 {out}"
+
+
+def test_graph_expansion_survives_huge_neighbour_set(tmp_path):
+    """邻居数超过 SQLite 变量上限时不能 500。
+
+    线上「人力有哪些流程」这类宽泛问题，图谱能从几十个种子扩出上万个邻居，
+    第三步 `src IN (...) OR dst IN (...)` 直接
+        OperationalError: too many SQL variables
+    → /api/v1/query 500，用户看到「提问失败」。
+    """
+    conn = init_db(str(tmp_path / "kb.db"))
+    conn.execute("INSERT INTO edges(src,dst,rel,chunk_id) VALUES (10,20,'r',1)")
+    n = 20000
+    conn.executemany(
+        "INSERT INTO edges(src,dst,rel,chunk_id) VALUES (10,?,'r',NULL)",
+        [(100000 + i,) for i in range(n)])
+    conn.executemany(
+        "INSERT INTO edges(src,dst,rel,chunk_id) VALUES (?,999,'r',?)",
+        [(100000 + i, 200000 + i) for i in range(n)])
+    conn.commit()
+    out = Retriever._graph(_Fake(conn), [1])
+    assert out, "大量邻居时也应召回 chunk"
+    assert all(200000 <= c < 200000 + n for c in out), out[:10]

@@ -77,8 +77,8 @@ POST /query
 | 字段 | 说明 |
 |---|---|
 | `answer` | 已基于检索到的原文生成；`[片段N]` 对应 `citations[N-1]` |
-| `citations[].snippet` | 命中片段前 200 字；**涉密命中时为空串** |
-| `citations[].text` | 片段全文，仅 `include_text=true` 且非涉密时才有 |
+| `citations[].snippet` | 命中片段前 200 字 |
+| `citations[].text` | 片段全文，仅 `include_text=true` 时才有 |
 | `citations[].locator` | 原文位置：`p9`=第9页，`sheet:名`=工作表，`slide5`=第5页幻灯片 |
 | `citations[].matched_by` | `vector` 语义 / `keyword` 关键词 / `wiki` 人工校正 / `graph` 图谱扩展 |
 | `citations[].document_id` | 文档 id，取全文/原文件时用 |
@@ -251,7 +251,7 @@ GET /documents/stats
   "tier1_done": 1, "tier2_done": 1, "non_document_files": 0 }
 ```
 
-> **涉密目录的原文不提供**：A 和 B 对涉密文档返回 **403**。需涉密内容请让有权限的人登录平台网页端查看。
+> **涉密目录只作标记**：`restricted=true` 仅用于审计/统计，不限制 `/content`、`/download` 与 `include_text`。
 
 ---
 
@@ -288,9 +288,8 @@ GET /documents/stats
 |---|---|---|
 | 400 | 参数错误 | 检查请求体字段名与类型 |
 | 401 | 密钥无效 / 已吊销 / 过期 | 让管理员重新签发 |
-| 403 | 超出可见范围，或文档位于涉密目录 | 告知需要管理员授权；涉密原文请登录平台查看 |
+| 403 | 超出可见范围 | 告知需要管理员授权 |
 | 404 | 资源不存在或不可见 | 不要反复重试（不区分"不存在"与"不可见"） |
-| 409 | 内容涉密但没有可用的内网模型 | 告知平台暂不可用 |
 | 429 | 超出配额 | 稍后重试，不要密集调用 |
 | 502 / 503 | 模型或服务不可用 | 退避重试；连续失败则告知用户稍后再试 |
 
@@ -302,10 +301,9 @@ GET /documents/stats
 2. **`[片段N]` 与 `citations[N-1]` 一一对应**，把对应条目的文件名与位置一并呈现给用户。
 3. **`citations` 为空 = 知识库里没有相关内容**。必须明确回答"知识库中未检索到相关文档"，
    **绝对不要**用通用知识或猜测来填补。
-4. **`restricted=true` 表示命中了涉密目录**。只转述 `answer`；不要用
-   `/documents/*/content`、`/documents/*/download` 或 `include_text` 取涉密原文（403）；
-   不要把片段内容转发给外部模型。
-5. **不要把 `citations[].snippet` 整段转发给外部大模型**——那是公司内部文档原文。
+4. **`restricted=true` 只是标记**：片段原文、`include_text`、`/documents/*/content`、
+   `/documents/*/download` 都按普通文档返回，不需要隐藏或改道。
+5. **不要把 `citations[].snippet` 整段转发给平台之外的大模型**——那是公司内部文档原文。
 6. **一次问答只调一次 `/query`**，平台有配额（默认每密钥每日 500 次）。
 7. **需要通读整篇时**用 `citations[].content_url` **一次**取全文，不要逐片段拼接。
 8. **保留原文中的数字、金额、时限、比例**。
@@ -375,5 +373,5 @@ Get-Content D:\kb-platform\kb\logs\supervisor.out.log -Tail 20   # 监督进程�
 | **必须用计划任务，不能用 `Start-Process` 起** | `Start-Process` 起的进程与调用它的 shell 同属一个 job object，shell 一被回收（会话结束/终端关闭/命令超时被杀）服务就被连带终止，**日志里没有任何异常** |
 | **Ollama 远端必须配 `num_ctx`** | runner 默认 `num_ctx=4096`，超长提示**静默截断**（不报错）。本机用 `qwen3.5-9b-64k` 变体；远端用请求级覆盖 |
 | **向量化模型必须全局唯一（bge-m3）** | 混用不同 embedding 模型会污染向量空间，检索直接失效 |
-| **涉密目录命中 → 强制内网模型 + 不回传原文** | 平台层强制；涉密目录在管理台配置 |
+| **涉密目录命中 → 自动用内网模型（标记仅审计）** | 平台层路由；涉密目录在管理台配置，不影响原文返回 |
 | **不要给写路径的 API 开放 NAS 写权限** | NAS 只读挂载，所有产物落本地 D 盘 |

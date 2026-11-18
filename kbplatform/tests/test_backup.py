@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from kbplatform.backup import backup_all, backup_db, prune_old
-from kbplatform.db import connect, init_db
+from kbplatform.db import checkpoint_wal, connect, init_db
 
 
 def _seed(conn: sqlite3.Connection, path: str) -> int:
@@ -106,6 +106,45 @@ def test_connect_sets_wal_journal_size_limit(tmp_path):
         assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
         limit = conn.execute("PRAGMA journal_size_limit").fetchone()[0]
         assert limit == 256 * 1024 * 1024
+    finally:
+        conn.close()
+
+
+def test_checkpoint_wal_truncates_oversized_wal(tmp_path):
+    """WAL 超过阈值时 checkpoint_wal 必须把它截断到 0。
+
+    背景：2026-11-17 WAL 涨到 125GB 写满磁盘，web 启动即 database is locked。
+    自动 checkpoint 是 PASSIVE 的，被旧读事务钉住时只能无限追加，所以流水线
+    每轮要有一层主动兜底。
+    """
+    db = str(tmp_path / "kb.db")
+    conn = connect(db)
+    try:
+        conn.execute("CREATE TABLE t(x BLOB)")
+        for _ in range(50):
+            conn.execute("INSERT INTO t VALUES (zeroblob(65536))")
+            conn.commit()
+        wal = db + "-wal"
+        assert os.path.getsize(wal) > 0
+        assert checkpoint_wal(conn, db, limit_bytes=1) is True
+        assert os.path.getsize(wal) == 0, "checkpoint 成功后 WAL 必须被截断"
+    finally:
+        conn.close()
+
+
+def test_checkpoint_wal_leaves_small_wal_alone(tmp_path):
+    """没到阈值时不要无谓地抢 checkpoint 锁（避免干扰正常读写）。"""
+    db = str(tmp_path / "kb.db")
+    conn = connect(db)
+    try:
+        conn.execute("CREATE TABLE t(x)")
+        conn.execute("INSERT INTO t VALUES (1)")
+        conn.commit()
+        wal = db + "-wal"
+        before = os.path.getsize(wal)
+        assert before > 0
+        assert checkpoint_wal(conn, db, limit_bytes=10 * 1024 ** 2) is True
+        assert os.path.getsize(wal) == before
     finally:
         conn.close()
 

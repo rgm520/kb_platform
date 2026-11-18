@@ -102,6 +102,59 @@ def test_update_pool_member_toggles_membership(tmp_path):
     assert M.get_model(conn, i).in_parse_pool is False
 
 
+def test_pool_limit_reads_extra_concurrency(tmp_path):
+    """每台机器能扛几个并发由模型配置决定（本地 1，远端可给 3~4）。"""
+    conn = init_db(str(tmp_path / "kb.db"))
+    m = _mk(conn, "远端", "http://192.0.2.77:11434", "qwen3.5:9b",
+            extra={"concurrency": 3})
+    pool = M.ParsePool(conn)
+    assert pool.limit_of(m) == 3
+
+
+def test_pool_capacity_is_sum_of_member_limits(tmp_path, monkeypatch):
+    """工作线程数 = 池容量：本地 1 + 远端 3 = 4 条提炼线程。"""
+    monkeypatch.setattr(M, "check_usable", lambda cfg: {"usable": True, "reason": ""})
+    conn = init_db(str(tmp_path / "kb.db"))
+    local = _mk(conn, "本地", "http://127.0.0.1:11434", "qwen3.5-9b-64k")
+    remote = _mk(conn, "远端", "http://192.0.2.77:11434", "qwen3.5:9b",
+                 extra={"concurrency": 3})
+    pool = M.ParsePool(conn)
+    assert pool.capacity() == 4
+
+    picked = [pool.pick() for _ in range(4)]
+    assert all(picked), "容量 4 应该能同时派出 4 个任务"
+    ids = [m.id for m in picked]
+    assert ids.count(local.id) == 1 and ids.count(remote.id) == 3
+    assert pool.pick() is None, "满载后必须返回 None，不能超发"
+
+
+def test_record_usage_accumulates_for_pipeline_bucket(tmp_path):
+    """流水线（无用户）的用量要累加到同一行，而不是每次插入新行。"""
+    conn = init_db(str(tmp_path / "kb.db"))
+    M.record_usage(conn, 7, prompt_tokens=100, output_tokens=20)
+    M.record_usage(conn, 7, prompt_tokens=50, output_tokens=5)
+    rows = conn.execute(
+        "SELECT user_id, model_id, calls, prompt_tokens, output_tokens"
+        " FROM model_usage").fetchall()
+    assert len(rows) == 1, f"用量被拆成了 {len(rows)} 行"
+    assert rows[0][0] is None and rows[0][1] == 7
+    assert rows[0][2] == 2 and rows[0][3] == 150 and rows[0][4] == 25
+
+
+def test_pool_status_includes_today_usage(tmp_path, monkeypatch):
+    """管理台要能看出「今天每个模型到底干了多少活」。"""
+    monkeypatch.setattr(M, "check_usable", lambda cfg: {"usable": True, "reason": ""})
+    conn = init_db(str(tmp_path / "kb.db"))
+    m = _mk(conn, "远端", "http://192.0.2.77:11434", "qwen3.5:9b",
+            extra={"concurrency": 3})
+    M.record_usage(conn, m.id, prompt_tokens=120, output_tokens=30)
+    st = M.ParsePool(conn).status()
+    row = [x for x in st["members"] if x["id"] == m.id][0]
+    assert row["today_calls"] == 1
+    assert row["today_prompt_tokens"] == 120
+    assert row["today_output_tokens"] == 30
+
+
 def test_pool_status_reports_mixed_family(tmp_path):
     conn = init_db(str(tmp_path / "kb.db"))
     _mk(conn, "A", "http://127.0.0.1:11434", "qwen3.5:9b-64k")

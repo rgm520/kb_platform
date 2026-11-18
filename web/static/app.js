@@ -7,7 +7,7 @@ const state = {
   docs: { page: 1, size: 50, total: 0 },
   filters: { status: "", share: "" },
   boardView: "docs", nonDocByExt: [],
-  cy: null, models: [], adminTab: "users", captchaId: null,
+  cy: null, models: [], adminTab: "users", captchaId: null, graphAnimated: false,
   restrictedDirs: [],
   tokenUserFilter: null, tokenLabel: "", tokenCounts: {},
   // 建号表单的草稿：面板每次重渲染都会重建 DOM，不存草稿的话，
@@ -368,6 +368,7 @@ function route() {
   if (p === "trash") window.KB && KB.trash && KB.trash.load();
   if (p === "board") loadStats(), loadDocs();
   if (p === "graph") initGraph();
+  else if (window.KB && KB.graphMotion) KB.graphMotion.stop();   // 离开图谱页就停动画
   if (p === "ask") loadModels();
   if (p === "admin") loadAdmin();
 }
@@ -863,11 +864,42 @@ let autoFit = true;          // 布局结束后是否自动缩放到全图
 // 布局参数：节点多、关系密，默认 cose 参数会把节点挤成一团、标签互相压盖。
 // 加大斥力与边长、降低重力、开启 tile（密集图更快更整齐），
 // 并让布局按"含标签的节点尺寸"计算斥力，标签才不会互相压。
+/* 节点最小间距：两个节点圆心至少拉开多少倍（半径和）。
+   1.5 太挤，节点会连成一片看不出结构；2.4 既有呼吸感又不至于把图撑散。 */
+const MIN_NODE_GAP = 2.4;
+/* 画布长宽比与布局不一致时的最大拉伸倍数。拉伸过大会把网络拉变形
+   （连线角度失真、节点排成行），1.4 以内观感还能接受。 */
+const MAX_ASPECT_STRETCH = 1.4;
+
+/* 力导向布局的参数（都是为"看得清结构"调的，别随手改）：
+ *   nodeOverlap  —— cose 里直接惩罚节点重叠的关键参数，太小就成毛球；
+ *   nodeRepulsion —— 斥力，节点之间互相推开（太大会在前几轮把节点甩飞）；
+ *   idealEdgeLength —— 期望连线长度，太短会挤成一团；
+ *   gravity —— 向心力，太大又会把所有东西吸到中心；
+ *   componentSpacing —— 组件间距，太大孤岛会被甩出去（再由 pullInliers 收回）。
+ *
+ * 这组值是实测挑出来的：斥力 30000（不是更大）才不会在收敛初期把节点
+ * 甩到几万像素外（那会让 fit 算出 zoom=0.05，图缩成一小点）。
+ */
+const LAYOUT_BASE = {
+  nodeOverlap: 40,
+  nodeRepulsion: (node) => 30000 + 8000 * Math.min(6, node.degree()),
+  idealEdgeLength: 220,
+  gravity: 0.12,
+  numIter: 2000,
+  componentSpacing: 80,
+};
+
 const GRAPH_LAYOUT = {
   name: "cose", animate: false, padding: 40, tile: true,
-  nodeRepulsion: (node) => 14000 + 4000 * Math.min(6, node.degree()),
-  idealEdgeLength: 150, edgeElasticity: 0.45, gravity: 0.15,
-  numIter: 1500, componentSpacing: 120, refresh: 20,
+  nodeOverlap: LAYOUT_BASE.nodeOverlap,
+  nodeRepulsion: LAYOUT_BASE.nodeRepulsion,
+  idealEdgeLength: LAYOUT_BASE.idealEdgeLength,
+  edgeElasticity: 0.45,
+  gravity: LAYOUT_BASE.gravity,
+  numIter: LAYOUT_BASE.numIter,
+  componentSpacing: LAYOUT_BASE.componentSpacing,
+  refresh: 20,
   nodeDimensionsIncludeLabels: true,
 };
 
@@ -915,10 +947,10 @@ function graphTooDense() {
 function enforceMinDistance() {
   const cy = state.cy;
   if (!cy) return;
-  const nodes = cy.nodes();
+  const nodes = cy.nodes().filter((n) => !n.hasClass("flow"));
   if (nodes.length < 2) return;
   const radius = (n) => (n.data("size") || 16) / 2;
-  for (let iter = 0; iter < 80; iter++) {
+  for (let iter = 0; iter < 120; iter++) {
     let moved = 0;
     for (let i = 0; i < nodes.length; i++) {
       for (let j = i + 1; j < nodes.length; j++) {
@@ -927,7 +959,7 @@ function enforceMinDistance() {
         let dx = pb.x - pa.x, dy = pb.y - pa.y;
         let d = Math.sqrt(dx * dx + dy * dy);
         if (d < 1e-6) { dx = (i % 7) - 3; dy = (j % 5) - 2; d = Math.sqrt(dx * dx + dy * dy); }
-        const need = 1.5 * (radius(a) + radius(b));   // 留出节点自身与标签的余量
+        const need = MIN_NODE_GAP * (radius(a) + radius(b));   // 留出节点自身与标签的余量
         if (d < need) {
           const push = (need - d) / 2;
           const ux = dx / d, uy = dy / d;
@@ -941,6 +973,35 @@ function enforceMinDistance() {
   }
 }
 
+/** 把离群节点（度数 ≤ 1、离核心很远）拉回核心附近。
+ *
+ *  力导向布局会把"孤岛"（跟谁都不连的节点）甩到很远，包围盒被撑大 →
+ *  fit 时整体缩小 → 主干那一坨就挤在角落、四周大片空白（"死板的堆叠"）。
+ *  这里把离群点收回到核心半径的 1.6 倍圈内，图就能填满画布。
+ */
+function pullInliers() {
+  const cy = state.cy;
+  if (!cy) return;
+  const nodes = cy.nodes().filter((n) => !n.hasClass("flow"));
+  const core = nodes.filter((n) => n.degree() >= 2);
+  if (!core.length) return;
+  let cx = 0, cyy = 0;
+  core.forEach((n) => { const p = n.position(); cx += p.x; cyy += p.y; });
+  cx /= core.length; cyy /= core.length;
+  let r = 0;
+  core.forEach((n) => { const p = n.position(); r = Math.max(r, Math.hypot(p.x - cx, p.y - cyy)); });
+  if (!r) return;
+  const limit = r * 1.6;
+  nodes.forEach((n) => {
+    if (n.degree() >= 2) return;
+    const p = n.position();
+    const dx = p.x - cx, dy = p.y - cyy;
+    const d = Math.hypot(dx, dy);
+    if (d <= limit || d < 1e-6) return;
+    n.position({ x: cx + dx / d * limit, y: cyy + dy / d * limit });
+  });
+}
+
 /** 布局的长宽比常常和画布差很多（竖长条塞进横窗口），白白浪费画布、节点挤成一团。
  *  这里把"瘦的那一维"拉宽，让图形铺满画布，节点在屏幕上就分得开。
  *  注意方向：布局比画布**瘦**（layoutAspect < viewAspect）时要拉宽 x，而不是压窄 x。 */
@@ -952,10 +1013,10 @@ function fitAspectToCanvas() {
   if (!bb || !bb.w || !bb.h || !W || !H) return;
   const k = W / H / (bb.w / bb.h);        // >1 表示布局偏瘦
   if (k > 1.12) {
-    const s = Math.min(2.0, k);
+    const s = Math.min(MAX_ASPECT_STRETCH, k);
     cy.nodes().forEach((n) => { const p = n.position(); n.position({ x: p.x * s, y: p.y }); });
   } else if (k < 0.89) {
-    const s = Math.min(2.0, 1 / k);
+    const s = Math.min(MAX_ASPECT_STRETCH, 1 / k);
     cy.nodes().forEach((n) => { const p = n.position(); n.position({ x: p.x, y: p.y * s }); });
   }
 }
@@ -982,13 +1043,15 @@ function relayout(animate) {
     animate: animate === true,
     animationDuration: 300,
     randomize: animate === true ? false : undefined,
-    idealEdgeLength: Math.round(120 * k),
-    nodeRepulsion: (node) => Math.round((16000 + 4000 * Math.min(6, node.degree())) * k),
+    idealEdgeLength: Math.round(LAYOUT_BASE.idealEdgeLength * k),
+    nodeRepulsion: (node) => Math.round(LAYOUT_BASE.nodeRepulsion(node) * k),
+    nodeOverlap: LAYOUT_BASE.nodeOverlap,
+    gravity: LAYOUT_BASE.gravity,
+    numIter: LAYOUT_BASE.numIter,
+    componentSpacing: LAYOUT_BASE.componentSpacing,
   }).run();
-  enforceMinDistance();
-  fitAspectToCanvas();
-  fitGraph();
-  declutterLabels();
+  // 收尾统一在 layoutstop 里做（finalizeGraphLayout）—— cose 跑完 run()
+  // 位置还在微调，在这里算 fit 会算错。
 }
 
 /** 标签去重叠：按重要度贪心放置，装不下的标签先藏起来（悬停/选中的始终显示）。 */
@@ -1069,62 +1132,59 @@ function fitGraph(animate) {
   cy.fit(els, 36, animate === false ? 0 : 200);
 }
 
+/** 布局结束后的收尾：拉回离群点 → 推开重叠 → 贴合画布 → 缩放合适。
+ *
+ *  必须在**布局稳定之后**做：cose 跑完 run() 位置还在继续微调
+ *  （实测模型高度从 730 变 592），提前算好的 fit 会被后面的位移带偏，
+ *  结果就是"图缩在一小坨、四周全是空"。所以先等位置不再变化再收尾。
+ */
+function finalizeGraphLayout() {
+  const cy = state.cy;
+  if (!cy) return;
+  pullInliers();
+  enforceMinDistance();
+  fitAspectToCanvas();
+  fitGraph();
+  declutterLabels();
+}
+
+/** 等布局稳定（连续两次采样位置没变）再收尾，最多等 4 秒。 */
+function settleThenFinalize() {
+  const cy = state.cy;
+  if (!cy) return;
+  let last = null, still = 0, waited = 0;
+  const tick = () => {
+    if (!cy || !state.cy) return;
+    const ns = cy.nodes().filter((n) => !n.hasClass("flow"));
+    if (!ns.length) return;
+    const pos = ns.map((n) => { const p = n.position(); return p.x.toFixed(1) + "," + p.y.toFixed(1); }).join("|");
+    if (last !== null && pos === last) still++; else still = 0;
+    last = pos;
+    waited += 220;
+    if (still >= 2 || waited > 4000) { finalizeGraphLayout(); return; }
+    setTimeout(tick, 220);
+  };
+  setTimeout(tick, 220);
+}
+
 function initGraph() {
-  if (state.cy) { fitGraph(); return; }
+  const cy = state.cy;
+  if (cy) { KB.graphView.fit(); return; }
   state.cy = cytoscape({
     container: $("#cy"),
     elements: [],
-    layout: GRAPH_LAYOUT,
+    layout: { name: "preset" },     // 初始位置由活体仿真自己长出来
     style: graphStyle(false),
     wheelSensitivity: 0.25,
+    // cytoscape 的 fit 受**实例** maxZoom 限制，默认值 1 —— 图永远放不大
+    maxZoom: 4,
+    minZoom: 0.02,
   });
-  const cy = state.cy;
   cyReady = true;
-
-  // 关系文字默认不画，鼠标悬停/选中时才显示对应那条
-  cy.on("mouseover", "edge", (e) => e.target.addClass("hot"));
-  cy.on("mouseout", "edge", (e) => e.target.removeClass("hot"));
-  cy.on("tap", "node", (e) => showNode(e.target.id()));
-  cy.on("layoutstop", () => {
-    if (autoFit) fitGraph();
-    declutterLabels();
-  });
-
-  // 悬停的节点永远显示名字
-  cy.on("mouseover", "node", (e) => e.target.removeClass("nolabel"));
-  cy.on("mouseout", "node", () => declutterLabels());
-
-  // 缩放/平移：只重新去重叠，**不重排**。
-  // （早先这里会"太挤就重排"，而 fit 会触发 zoom 事件 → 重排 → fit → zoom → …
-  //   形成自激循环，节点一直抖。现在布局只在加载/窗口变化/手动点击时发生。）
-  let dcTimer = 0;
-  const scheduleDeclutter = () => {
-    clearTimeout(dcTimer);
-    dcTimer = setTimeout(() => { if (state.cy) declutterLabels(); }, 120);
-  };
-  cy.on("zoom", scheduleDeclutter);
-  cy.on("pan", scheduleDeclutter);
-
-  // 画布尺寸真的变了才重排（ResizeObserver 会重复触发，用尺寸去重防抖）
-  let rzTimer = 0, lastSize = "";
-  const refit = () => {
-    clearTimeout(rzTimer);
-    rzTimer = setTimeout(() => {
-      if (!state.cy || !state.cy.nodes().length) return;
-      const key = state.cy.width() + "x" + state.cy.height();
-      if (key === lastSize) return;       // 尺寸没变就不动，节点保持稳定
-      lastSize = key;
-      autoFit = true;
-      relayout(true);
-    }, 260);
-  };
-  window.addEventListener("resize", refit);
-  // 容器自身尺寸变化（侧栏展开、工具栏换行、浏览器页面缩放）同样要重排
-  if (window.ResizeObserver) {
-    const ro = new ResizeObserver(() => refit());
-    ro.observe($("#cy"));
-  }
-
+  const gv = window.KB && KB.graphView;
+  if (gv) gv.init(state.cy);
+  // 节点点击：看详情（右侧栏）
+  state.cy.on("tap", "node", (e) => showNode(e.target.id()));
   loadGraphOverview();
 }
 
@@ -1132,34 +1192,31 @@ async function loadGraphOverview() {
   const cy = state.cy;
   if (!cy) return;
   try {
-    const r = await api("/api/v1/graph/overview?limit=60");
-    cy.elements().remove();
+    // 一次给足节点（Obsidian 式：一屏上千个点），而不是 60 个
+    const r = await api("/api/v1/graph/view?limit=1000");
+    const gv = window.KB && KB.graphView;
+    if (gv) {
+      gv.load(r);
+      $("#g-side").innerHTML = `<h3>知识图谱</h3>
+        <div class="kv">已加载 ${r.counts.nodes} 个节点、${r.counts.edges} 条关系</div>
+        ${state.role === "admin" ? "" : '<div class="kv">只显示你授权目录内的图谱</div>'}
+        <div class="kv">右侧面板可筛选、分组、调显示效果</div>
+        <div class="kv">节点位置由力仿真持续演化（可随时拖动）</div>`;
+      return;
+    }
+    // 兜底（没有 graph-view 模块时）：旧的一次性布局
     const ids = new Set(r.nodes.map(n => String(n.id)));
-    const total = r.nodes.length;
-    const els = r.nodes.map(n => ({ data: {
-      id: String(n.id), label: n.name, type: n.type,
-      size: graphNodeSize(n.mentions || 0, total) } }));
+    const els = r.nodes.map(n => ({ data: { id: String(n.id), label: n.name, type: n.type,
+      size: graphNodeSize(n.mentions || 0, r.nodes.length) } }));
     for (const e of r.edges) {
       if (!ids.has(String(e.src)) || !ids.has(String(e.dst))) continue;
       els.push({ data: { id: e.src + "->" + e.dst + "|" + e.rel,
                          source: String(e.src), target: String(e.dst), rel: e.rel } });
     }
+    cy.elements().remove();
     cy.add(els);
     autoFit = true;
     cy.layout(GRAPH_LAYOUT).run();
-    enforceMinDistance();
-    fitAspectToCanvas();
-    fitGraph();
-    declutterLabels();
-    $("#g-side").innerHTML = r.nodes.length
-      ? `<h3>知识图谱</h3>
-         <div class="kv">已加载 ${r.nodes.length} 个高频节点、${r.edges.length} 条关系</div>
-         ${state.role === "admin" ? "" : '<div class="kv">只显示你授权目录内的图谱</div>'}
-         <div class="kv">点击节点查看详情，或用上方搜索定位</div>`
-      : `<h3>知识图谱</h3>
-         ${state.role === "admin"
-            ? '<div class="muted">还没有图谱数据，Tier 2 提炼完成后会自动出现。</div>'
-            : '<div class="muted">你的授权目录里还没有图谱数据。<br>授权更多目录，或等文档解析提炼完成。</div>'}`;
   } catch (e) { toast("图谱加载失败: " + e.message); }
 }
 
@@ -1182,8 +1239,12 @@ async function searchNodes() {
 $("#g-search").addEventListener("click", searchNodes);
 $("#g-refresh").addEventListener("click", loadGraphOverview);
 $("#g-q").addEventListener("keydown", e => { if (e.key === "Enter") searchNodes(); });
-$("#g-fit").addEventListener("click", () => { fitGraph(); declutterLabels(); });
-$("#g-layout").addEventListener("click", () => relayout(true));
+$("#g-fit").addEventListener("click", () => { const gv = KB.graphView; if (gv) gv.fit(); else fitGraph(); });
+$("#g-layout").addEventListener("click", () => {
+    // 重新布局：把节点位置打散，活体仿真会重新把它们长开
+    const gv = KB.graphView;
+    if (gv) { gv.scatter(); gv.fit(); } else relayout(true);
+  });
 $("#g-zoom-in").addEventListener("click", () => {
   const cy = state.cy; if (!cy) return;
   cy.resize();
@@ -1196,10 +1257,9 @@ $("#g-zoom-out").addEventListener("click", () => {
   cy.zoom({ level: Math.max(0.05, cy.zoom() / 1.25), renderedPosition: { x: cy.width() / 2, y: cy.height() / 2 } });
   declutterLabels();
 });
-$("#g-rel-label").addEventListener("change", (e) => {
-  const cy = state.cy; if (!cy) return;
-  cy.style(graphStyle(e.target.checked));
-});
+// 注：原来这里绑定「关系文字」复选框（#g-rel-label），但工具栏改版时
+// 那个复选框已经删掉了 —— 对不存在的元素 addEventListener 会抛异常，
+// 而模块级代码一抛，**后面所有语句都不再执行**（页面看着正常，按钮全失灵）。
 
 async function expandNode(id, replace) {
   try {
@@ -1274,25 +1334,20 @@ async function ask() {
   const q = $("#a-q").value.trim();
   if (!q) return;
   const btn = $("#a-go"); btn.disabled = true; btn.textContent = "思考中…";
-  $("#a-notice").classList.add("hidden");
   $("#a-feedback").classList.add("hidden");
   try {
     const r = await api("/api/v1/query", { method: "POST", body: { question: q, model: $("#a-model").value, top_k: 8 } });
     $("#a-answer").textContent = r.answer || "(无输出)";
-    if (r.restricted) {
-      const n = $("#a-notice");
-      n.textContent = r.restricted_notice || "本次回答命中涉密内容，已锁定本地模型且未回传片段原文";
-      n.classList.remove("hidden");
-    }
+    // 2026-11-11 起不再有「涉密·原文不回传」提示：内网 + 本地模型，
+    // 命中涉密目录也照常回传片段原文。
     // 答案反馈（Task 0.3）：request_id 要原样回传，后台轨迹靠它对上号
     renderAskFeedback(r.request_id);
     const box = $("#a-cites"); box.innerHTML = "";
     (r.citations || []).forEach((c, i) => {
       const d = document.createElement("div");
-      d.className = "cite" + (c.restricted ? " restricted" : "");
+      d.className = "cite";
       d.innerHTML = `<div><span class="f">[片段${i + 1}] ${esc(c.file)}</span><span class="loc">位置 ${esc(c.locator)}</span></div>
-        <div class="tags">${(c.matched_by || []).map(x => `<span class="tag">${esc(x)}</span>`).join("")}
-        ${c.restricted ? '<span class="tag">涉密·原文不回传</span>' : ""}</div>
+        <div class="tags">${(c.matched_by || []).map(x => `<span class="tag">${esc(x)}</span>`).join("")}</div>
         ${c.snippet ? `<div class="sn">${esc(c.snippet)}</div>` : ""}`;
       d.addEventListener("contextmenu", (ev) => {
         ev.preventDefault();
@@ -1673,7 +1728,7 @@ async function adminRestricted(body) {
       <td>${d.restricted ? `<button class="sm" onclick="clearRestricted(${i})">取消标记</button>`
                           : '<span class="muted">—</span>'}</td></tr>`).join("")}
     </tbody></table>
-    <p class="muted">命中涉密目录的查询会自动锁定本地模型，且不向云端回传片段原文。</p>`;
+    <p class="muted">涉密标记仅作审计/统计，不再限制片段显示、全文查看与下载。</p>`;
 }
 window.addRestricted = async () => {
   try {

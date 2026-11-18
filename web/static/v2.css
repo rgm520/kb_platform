@@ -421,6 +421,26 @@ body.fm-preview-open .fm-shell{grid-template-columns:230px minmax(0,1fr) minmax(
   background:#f6f8fb;cursor:pointer;object-fit:contain}
 #login-captcha-prompt{font-size:14px;color:var(--fg);font-weight:600;letter-spacing:1px}
 
+/* ------------------------------------------------------------ 图谱（Obsidian 式）
+   画布 + 右侧控制面板（筛选 / 分组 / 显示），节点位置由持续的力仿真驱动。 */
+.graph-wrap{grid-template-columns:minmax(0,1fr) 250px 300px}
+#p-graph #g-panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  padding:12px;overflow:auto;max-height:100%}
+.gp-sec{padding:8px 0 12px;border-bottom:1px solid var(--line)}
+.gp-sec:last-child{border-bottom:0}
+.gp-head{display:flex;justify-content:space-between;align-items:center;font-weight:600;
+  font-size:13px;margin-bottom:8px}
+.gp-search{width:100%;margin-bottom:8px;padding:7px 10px;border-radius:8px;
+  background:var(--panel2);border:1px solid var(--line);color:var(--fg);font-size:13px;outline:none}
+.gp-search:focus{border-color:rgba(34,211,238,.45)}
+.gp-chk{display:flex;align-items:center;gap:7px;font-size:12.5px;margin:5px 0;color:var(--fg)}
+.gp-chk .muted{margin-left:auto;font-size:11.5px}
+.gp-dot{width:9px;height:9px;border-radius:50%;display:inline-block}
+.gp-slider{display:block;font-size:12.5px;margin:9px 0;color:var(--fg)}
+.gp-slider span{float:right;color:var(--muted);font-size:11.5px}
+.gp-slider input[type=range]{width:100%;margin-top:4px;accent-color:var(--tech)}
+#cy{background:#0b1117}
+
 @media (prefers-reduced-motion:reduce){
   *{animation:none!important;transition:none!important}
 }

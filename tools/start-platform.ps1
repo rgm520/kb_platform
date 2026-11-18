@@ -59,7 +59,8 @@ if ($existing.Count -gt 0) {
   exit 0
 }
 
-$env:KB_SESSION_SECRET = "CHANGE_ME_SESSION_SECRET"
+# 会话密钥从 config.toml 的 [security].session_secret 读取；
+# 如需覆盖再设置环境变量 KB_SESSION_SECRET（不要把真实密钥写进仓库）。
 $env:PYTHONIOENCODING = "utf-8"
 
 Write-Host "启动知识库平台监督进程..." -ForegroundColor Cyan

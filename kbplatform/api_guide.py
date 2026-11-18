@@ -176,8 +176,8 @@ POST $API/query
   例如"（来源：附件：xxx.pdf 第 9-13 页）"
 - `citations[].snippet` = 命中那段的原文摘录（200 字），可以贴给用户核对
 - `citations[].document_id` = 文档 id，要下整篇或原文件时用它
-- `citations[].restricted` = 该片段是否涉密
-- `restricted`（顶层）= 这次回答是否碰到涉密目录
+- `citations[].restricted` = 该片段是否命中涉密目录标记（**仅提示，不影响返回内容**）
+- `restricted`（顶层）= 这次回答是否碰到涉密目录标记（仅提示）
 
 ### 案例 A：问一个问题
 
@@ -406,7 +406,7 @@ GET $API/graph/subgraph?node=<id>&hops=2&types=entity,knowledge_point   中心�
 |---|---|---|
 | 400 | 参数写错了 | 检查 JSON 字段名和类型 |
 | 401 | 密钥无效 / 已吊销 / 过期 / **只拿到了前缀** | 按提示语处理：前缀→让管理员发完整密钥；吊销/过期→让管理员换一枚。不要盲目重试 |
-| 403 | 超出你能看的目录，或文档在涉密目录 | 告知需要管理员授权；涉密原文请让用户登录平台网页端看 |
+| 403 | 超出你能看的目录 | 告知需要管理员授权 |
 | 404 | 资源不存在或不可见 | 别反复重试（平台不区分"不存在"和"不可见"） |
 | 429 | 超出调用配额 | 稍后再试，别密集调用 |
 | 502 / 503 | 模型或服务暂时不可用 | 退避重试；连续失败就告诉用户稍后再试 |
@@ -419,13 +419,10 @@ GET $API/graph/subgraph?node=<id>&hops=2&types=entity,knowledge_point   中心�
    `citations` 为空 = 知识库里没有相关内容。此时必须明确回答
    "知识库中未检索到相关文档"，**绝对不要**用通用知识或猜测来补。
 
-2. **涉密内容不能外传。**
+2. **`restricted` 只是标记，不是禁止令。**
    顶层 `restricted=true` 表示这次回答碰到了涉密目录（党建、审计、HR 薪酬等）。
-   平台已经自动把模型切换到内网模型，也**不回传涉密原文**。你要做的：
-   - 只转述 `answer`
-   - **不要**去调 `/content`、`/download` 或用 `include_text` 取涉密原文（会 403）
-   - **不要**把片段内容转发给外部模型
-   - 提示用户"该内容属内部受限范围，请登录知识库平台查看原文"
+   平台部署在局域网、模型也在内网，片段原文、`/content`、`/download`
+   都按普通文档正常返回，不需要隐藏或改道。
 
 3. **原文别整段转发给外部模型。**
    `citations[].snippet` 是公司内部文档原文。正确做法是转述 `answer`，
@@ -526,7 +523,7 @@ Get-Content D:\\kb-platform\\kb\\logs\\supervisor.out.log -Tail 20   # 监督进
 | **必须用计划任务，不能用 `Start-Process` 起** | `Start-Process` 起的进程与调用它的 shell 同属一个 job object，shell 一被回收（会话结束/终端关闭/命令超时被杀）服务就被连带终止，**日志里没有任何异常** |
 | **Ollama 远端必须配 `num_ctx`** | runner 默认 `num_ctx=4096`，超长提示**静默截断**（不报错）。本机用 `qwen3.5-9b-64k` 变体；远端用请求级覆盖 |
 | **向量化模型必须全局唯一（bge-m3）** | 混用不同 embedding 模型会污染向量空间，检索直接失效 |
-| **涉密目录命中 → 强制内网模型 + 不回传原文** | 平台层强制；涉密目录在管理台配置 |
+| **涉密目录命中 → 自动用内网模型（标记仅审计）** | 平台层路由；涉密目录在管理台配置，不影响原文返回 |
 | **不要给写路径的 API 开放 NAS 写权限** | NAS 只读挂载，所有产物落本地 D 盘 |
 """
     return md
@@ -546,6 +543,10 @@ def build_skill_snippet(api: str, token: str | None = None) -> str:
 export ZB_KB_TOKEN="{tok}"
 export ZB_KB_BASE_URL="{api}"
 ```
+
+> `ZB_KB_BASE_URL` **带不带 `/api/v1` 都行**：技能包里的 `scripts/query.py`、
+> `scripts/search.py` 会自己补 `/api/v1` 再拼接口路径。写成服务根
+> （如 `http://host:8000`）也一样能跑通。
 
 ## 查知识
 ```bash
@@ -570,9 +571,10 @@ curl -s "$ZB_KB_BASE_URL/documents/<document_id>/knowledge" -H "Authorization: B
 1. 一次问答只调一次 `/query`（有配额）。
 2. `citations` 为空 -> 明确说"知识库中未检索到相关文档"，**不要编造**。
 3. `answer` 里的 `[片段N]` 对应 `citations[N-1]`，把文件名与位置一并呈现。
-4. `restricted=true` -> 只转述 `answer`；**不要**调 `/content` `/download` 取涉密原文（403），
-   也不要把片段内容转发给外部模型。
+4. `restricted=true` 只是标记：片段原文、`/content`、`/download` 都正常返回，按普通文档处理。
 5. `snippet` 是公司内部原文，**不要整段转发给外部大模型**。
+   技能包的 `scripts/query.py` / `scripts/search.py` **默认不打印 snippet**
+   （只给文件名 + 位置 + 片段号）；确实要原文时加 `--with-snippet`。
 6. 需要通读整篇时用 `/content` 一次取全文。
 7. 超时 180 秒。
 """

@@ -2,7 +2,8 @@
 
 安全要点（spec §7.5.4 / §7.6 / §7.7）：
   * 检索每一路都过 scope 过滤
-  * 命中涉密 -> 自动路由本地模型；涉密片段**默认不回传原文**
+  * 命中涉密 -> 自动路由本地模型；`restricted` 仅作审计/统计标记，
+    片段原文、全文下载都不再屏蔽（局域网 + 本地模型，2026-11-11 放开）
   * token 只存哈希；token 调用记审计
   * 限流按 token
 """
@@ -28,13 +29,14 @@ from kbplatform import captcha
 from kbplatform import grants as grants_mod
 from kbplatform import hashing, shortcut
 from kbplatform import fs_service
+from kbplatform import graph_export
 from kbplatform.config import Config, load_config
 from kbplatform.db import init_db, ThreadLocalConn, purge_expired_trace_data, write_with_retry
 from kbplatform.fs_service import provision_sources_from_config, register_fs_routes
 from kbplatform.retrieval import Retriever
 from kbplatform.scanner import SourceScanner
-from kbplatform.scopes import (load_restricted, load_scopes, describe_scopes,
-                               is_restricted, unified_predicate)
+from kbplatform.scopes import (load_scopes, describe_scopes,
+                               unified_predicate)
 from kbplatform.vectors import VectorStore
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -538,14 +540,13 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
         for i, h in enumerate(hits, 1):
             c = {"chunk_id": h.chunk_id, "file": os.path.basename(h.file_path),
                  "path": h.file_path, "locator": h.locator,
-                 "snippet": "", "text": None,
+                 "snippet": h.text[:200], "text": None,
                  "matched_by": h.matched_by, "restricted": h.restricted}
-            # 涉密内容**一律不回传原文**（snippet 与 text 都空）；
-            # 非涉密给 200 字摘录，全文只在显式 include_text 时回传。
-            if not h.restricted:
-                c["snippet"] = h.text[:200]
-                if want_text:
-                    c["text"] = h.text
+            # 2026-11-11 按用户要求放开：内网 + 本地模型，涉密目录的片段原文
+            # 同样回传（restricted 只作为审计/统计标记，不再挡内容）。
+            # 全文仍只在显式 include_text 时给，避免一次问答塞回几万字。
+            if want_text:
+                c["text"] = h.text
             # 让 AI 能顺着片段找到整篇文档
             c["document_id"] = h.document_id
             c["content_url"] = f"/api/v1/documents/{h.document_id}/content"
@@ -563,8 +564,6 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
                 "model_used": used.model_id, "model_requested": requested.model_id,
                 "restricted": restricted, "model_switched": switched,
                 "usage": usage, "request_id": "req_" + secrets.token_hex(6)}
-        if restricted:
-            resp["restricted_notice"] = "本次回答命中涉密内容，已锁定本地模型，且未回传片段原文"
 
         # 检索轨迹：让"不准"变得可度量。只存 chunk id / 分数 / 命中通道，
         # 问题只存哈希前 16 位——轨迹表与审计分开（审计有 question，轨迹没有，
@@ -715,7 +714,7 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
             results.append({"chunk_id": h.chunk_id, "document_id": h.document_id,
                             "file": os.path.basename(h.file_path),
                             "path": h.file_path, "locator": h.locator,
-                            "snippet": "" if h.restricted else h.text[:200],
+                            "snippet": h.text[:200],
                             "score": round(h.score, 5), "matched_by": h.matched_by,
                             "restricted": h.restricted})
         tok = ctx["token_row"]
@@ -788,6 +787,78 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
                 ids + ids + params).fetchall()
             edges = [{"src": r[0], "dst": r[1], "rel": r[2]} for r in erows]
         return {"nodes": nodes, "edges": edges}
+
+    @app.get("/api/v1/graph/view")
+    def api_graph_view(limit: int = 1000, ctx=Depends(actor)):
+        """一次给足节点与关系 —— 给"活体图谱"用（Obsidian 式：成百上千个点）。
+
+        与 /overview 的区别：overview 只给 60 个高频节点做详情用；
+        view 给一整张图（默认 1000，最多 3000），并且带上每个节点的
+        类型与度数，画布才能按分组上色、按度数定大小。
+        """
+        u = ctx["user"]
+        pred, params = scope_predicate(u)
+        limit = max(50, min(int(limit or 1000), 3000))
+        rows = conn.execute(
+            f"""SELECT n.id, n.name, n.type, n.mentions FROM nodes n
+                WHERE n.merged_to IS NULL AND EXISTS (
+                  SELECT 1 FROM edges e JOIN chunks ch ON ch.id=e.chunk_id
+                  JOIN catalog c ON c.path=ch.file_path
+                  WHERE (e.src=n.id OR e.dst=n.id) AND {pred})
+                ORDER BY n.mentions DESC LIMIT ?""",
+            params + [limit]).fetchall()
+        nodes = [{"id": r[0], "name": r[1], "type": r[2] or "entity",
+                  "mentions": r[3] or 0} for r in rows]
+        ids = [n["id"] for n in nodes]
+        edges = []
+        if ids:
+            marks = ",".join("?" * len(ids))
+            erows = conn.execute(
+                f"""SELECT e.src, e.dst, e.rel FROM edges e
+                    JOIN chunks ch ON ch.id=e.chunk_id
+                    JOIN catalog c ON c.path=ch.file_path
+                    WHERE e.src IN ({marks}) AND e.dst IN ({marks}) AND {pred}
+                    GROUP BY e.src, e.dst, e.rel LIMIT 12000""",
+                ids + ids + params).fetchall()
+            edges = [{"src": r[0], "dst": r[1], "rel": r[2] or "关联"} for r in erows]
+        # 度数：给画布算节点大小用
+        deg: dict = {}
+        for e in edges:
+            deg[e["src"]] = deg.get(e["src"], 0) + 1
+            deg[e["dst"]] = deg.get(e["dst"], 0) + 1
+        for n in nodes:
+            n["degree"] = deg.get(n["id"], 0)
+        return {"nodes": nodes, "edges": edges,
+                "counts": {"nodes": len(nodes), "edges": len(edges)}}
+
+    @app.get("/api/v1/graph/export/vault")
+    def api_graph_export_vault(limit: int = 800, ctx=Depends(actor)):
+        """导出成 Obsidian 库（zip）：实体/文档各一篇 markdown，双链相连。
+
+        Obsidian 的插件跑在它自己的桌面端，没法嵌进网页；但它的**库格式**
+        是公开的 —— 导出去用 Obsidian 打开，就能用上它现成的图谱视图、
+        搜索、双链和插件生态（Graph Analysis / Dataview）。
+        """
+        u = ctx["user"]
+        pred, params = scope_predicate(u)
+        data = graph_export.build_vault(conn, pred, params, limit)
+        return Response(
+            content=data,
+            media_type="application/zip",
+            headers={"Content-Disposition":
+                     'attachment; filename="kb-graph-obsidian.zip"'})
+
+    @app.get("/api/v1/graph/export/canvas")
+    def api_graph_export_canvas(limit: int = 200, ctx=Depends(actor)):
+        """导出成 Obsidian 画布（.canvas）+ 配套笔记库。"""
+        u = ctx["user"]
+        pred, params = scope_predicate(u)
+        data = graph_export.canvas_zip_bytes(conn, pred, params, limit)
+        return Response(
+            content=data,
+            media_type="application/zip",
+            headers={"Content-Disposition":
+                     'attachment; filename="kb-graph-canvas.zip"'})
 
     @app.get("/api/v1/graph/neighbors")
     def api_graph_neighbors(node: int, hops: int = 1, ctx=Depends(actor)):
@@ -873,19 +944,6 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
                 uniq.append(e)
         return {"nodes": nodes_out, "edges": uniq}
 
-    def _mask_restricted_detail(user: dict, restricted: list, d: dict) -> None:
-        """status_detail 的涉密脱敏（结构性判断，不做字符串替换）。
-
-        用现成的涉密判定（scopes.is_restricted / load_restricted）判断该文档
-        是否命中涉密目录；命中就把整个 status_detail 换成固定文案「（涉密目录）」，
-        失败原因里的任何路径都不再出现，也不泄露是哪个涉密目录。
-        管理员不受影响；status_detail 缺失/为空时无需脱敏。
-        """
-        if not d.get("status_detail") or user.get("role") == "admin":
-            return
-        if is_restricted(restricted, d["share"], d["rel_path"]):
-            d["status_detail"] = "（涉密目录）"
-
     @app.get("/api/v1/documents")
     def api_documents(request: Request, status: Optional[str] = None,
                       share: Optional[str] = None, page: int = 1,
@@ -907,14 +965,9 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
             where.append("c.tier2_done=1")
         sql = f"SELECT c.* FROM catalog c WHERE {' AND '.join(where)} ORDER BY c.id LIMIT ? OFFSET ?"
         rows = conn.execute(sql, params + [page_size, (page - 1) * page_size]).fetchall()
-        # 失败原因对普通用户也可见了（spec C4：不再只让人看见"坏"）；
-        # 命中涉密目录的文档按记录做结构性脱敏，不借助失败原因泄露涉密路径
-        restricted = load_restricted(conn) if u["role"] != "admin" else []
-        items = []
-        for r in rows:
-            d = dict(r)
-            _mask_restricted_detail(u, restricted, d)
-            items.append(d)
+        # 失败原因对普通用户也可见（spec C4：不再只让人看见"坏"）；
+        # 涉密标记只作审计，不再脱敏失败原因。
+        items = [dict(r) for r in rows]
         total = conn.execute(
             f"SELECT COUNT(*) FROM catalog c WHERE {' AND '.join(where)}", params).fetchone()[0]
         return {"total": total, "page": page, "page_size": page_size, "items": items}
@@ -1065,10 +1118,6 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
     def api_document(catalog_id: int, ctx=Depends(actor)):
         u = ctx["user"]
         d = _get_catalog_row(catalog_id, u)
-        # 列表接口已放开失败原因；详情接口保持同一规则：
-        # 普通用户命中涉密目录的文档同样脱敏，不能从详情弹窗绕过
-        if u["role"] != "admin":
-            _mask_restricted_detail(u, load_restricted(conn), d)
         kps = conn.execute(
             "SELECT summary, key_points FROM knowledge WHERE file_path=? ORDER BY chunk_id",
             (d["path"],)).fetchall()
@@ -1132,11 +1181,9 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
         """取文档的**完整纯文本**（所有块按顺序拼接）。
 
         检索/问答只返回命中的片段；AI 需要通读全文时用这个。
-        涉密文档的原文**不回传**（返回 403），与平台的出网管控一致。
+        涉密目录同样按可见范围返回原文（标记只作审计）。
         """
         d = _get_catalog_row(catalog_id, ctx["user"])
-        if _is_restricted_sub(conn, d["share"], d["rel_path"]):
-            raise HTTPException(403, detail="该文档位于涉密目录，不提供原文内容")
         rows = conn.execute(
             "SELECT chunk_idx, text, locator FROM chunks WHERE file_path=? ORDER BY chunk_idx",
             (d["path"],)).fetchall()
@@ -1226,11 +1273,9 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
     def api_document_download(catalog_id: int, ctx=Depends(actor)):
         """下载**原始文件**（从 NAS 流式读取）。
 
-        涉密目录的原文不提供下载。
+        涉密目录同样允许下载（标记只作审计）。
         """
         d = _get_catalog_row(catalog_id, ctx["user"])
-        if _is_restricted_sub(conn, d["share"], d["rel_path"]):
-            raise HTTPException(403, detail="该文档位于涉密目录，不提供原文下载")
         path = d["path"]
         if not os.path.exists(path):
             raise HTTPException(404, detail="源文件已不存在")
@@ -1774,9 +1819,17 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
                 404, detail="这枚密钥没有保存可恢复密文（可能是本平台上线前签发的，"
                             "或配置里关掉了 token_recoverable）。请重新签发一枚。")
         # 留痕：谁在什么时候调看了密钥明文
-        audit(ctx["id"], row["prefix"], "token_view",
-              question=f"token_id={token_id}", hit_paths=None, model_used=None,
-              restricted=False, ip=_client_ip(request))
+        # ctx 是 actor() 返的**嵌套** dict（{"user": {...}}），没有顶层 id ——
+        # 读 ctx["id"] 会 KeyError，整个接口 500（普通用户点「查看密钥」就废了）。
+        # 审计是旁路：写不进去只记日志，绝不能因此不把密钥还给用户——
+        # 这个接口的意义就是「密钥丢了能原地找回」，它一 500 就正好废掉了。
+        try:
+            audit(ctx["user"]["id"], row["prefix"], "token_view",
+                  question=f"token_id={token_id}", hit_paths=None, model_used=None,
+                  restricted=False, ip=_client_ip(request))
+        except Exception as e:
+            print(f"[token_view] 审计写入失败（忽略）token_id={token_id}: "
+                  f"{type(e).__name__}: {e}", flush=True)
         return {"id": token_id, "token": plain, "prefix": row["prefix"],
                 "revoked": bool(row["revoked"]),
                 "notice": "密钥明文可再次查看——请直接复制给客户端，不要转述前缀。"}
@@ -1879,7 +1932,13 @@ def make_app(config_path: str = "D:/kb-platform/config.toml") -> FastAPI:
             try:
                 with open(fp, "r", encoding="utf-8") as f:
                     html = f.read()
-                for name in ("app.js", "style.css", "cytoscape.min.js"):
+                # 所有前端资源都带 mtime 版本号：浏览器拿到新 HTML 时，
+                # 配套的 JS/CSS 一定也是新的。否则会出现"新 HTML + 旧 JS"
+                # 的混搭 —— 页面看着正常，但某个模块其实没加载（功能全失灵），
+                # 这种问题极难从界面上看出来。
+                for name in ("app.js", "style.css", "cytoscape.min.js",
+                             "graph-view.js", "v2.css", "desktop.js",
+                             "files.js", "admin-sources.js"):
                     p = os.path.join(WEB_DIR, "static", name)
                     try:
                         v = int(os.path.getmtime(p))

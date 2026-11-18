@@ -697,7 +697,7 @@ window.KB = window.KB || {};
       return;
     }
     box.innerHTML = hits.map((h, i) => {
-      const snippet = h.restricted ? "涉密·原文不回传" : (h.snippet || "");
+      const snippet = h.snippet || "";
       const tags = (h.matched_by || []).map((m) => ROUTE_NAMES[m] || m).join(" / ");
       return `<div class="fm-search-item" data-i="${i}">
         <div>${esc(h.file)}${tags ? `<span class="tag">${esc(tags)}</span>` : ""}</div>

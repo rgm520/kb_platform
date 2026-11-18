@@ -1,12 +1,11 @@
-"""失败原因（catalog.status_detail）对普通用户可见 + 涉密路径脱敏。
+"""失败原因（catalog.status_detail）对普通用户可见。
 
 对应迭代任务 0.5（spec C4「只会看得见坏，看不见为什么」）：
 
   * `GET /api/v1/documents` 不再对普通用户剥掉 `status_detail` ——
     看板能告诉用户"为什么坏了"，不再只有一句"已跳过/失败"。
-  * 但命中涉密目录（`dir_scopes`）的文档：失败原因脱敏成
-    固定文案「（涉密目录）」，不泄露是哪个涉密目录及其路径；
-    管理员仍看完整原因。
+  * 涉密目录（`dir_scopes`）只作审计标记：失败原因、详情都照常展示
+    （2026-11-11 放开，内网 + 本地模型）。
 """
 from __future__ import annotations
 
@@ -78,21 +77,18 @@ def test_status_detail_visible_to_normal_user(app):
     by_name = {d["name"]: d for d in items}
     assert set(by_name) == {"薪酬明细.xlsx", "通讯录.pdf"}, "授权范围内的两篇都应可见"
     assert by_name["通讯录.pdf"]["status_detail"] == COMMON_DETAIL
-    assert by_name["薪酬明细.xlsx"]["status_detail"], "涉密文档也要有失败说明（允许被脱敏）"
+    assert by_name["薪酬明细.xlsx"]["status_detail"] == SECRET_DETAIL
 
 
-def test_status_detail_redacts_restricted_path(app):
-    """命中涉密目录的文档：失败原因脱敏为固定文案，不泄露目录位置。"""
+def test_status_detail_visible_for_restricted_doc(app):
+    """命中涉密目录的文档：失败原因照常展示，不再脱敏。"""
     uid = _user(app, "alice")
     _seed(app, uid)
     c = _login(app, "alice")
     items = c.get("/api/v1/documents?page_size=50").json()["items"]
     by_name = {d["name"]: d for d in items}
     secret = by_name["薪酬明细.xlsx"]
-    assert secret["status_detail"] == "（涉密目录）"
-    assert "被其它进程独占" not in secret["status_detail"]
-    assert "审计资料" not in secret["status_detail"]
-    # 普通目录的失败原因不受影响
+    assert secret["status_detail"] == SECRET_DETAIL
     assert by_name["通讯录.pdf"]["status_detail"] == COMMON_DETAIL
 
 
@@ -108,8 +104,8 @@ def test_admin_sees_full_status_detail(app):
     assert by_name["通讯录.pdf"]["status_detail"] == COMMON_DETAIL
 
 
-def test_detail_endpoint_redacts_restricted_path_for_normal_user(app):
-    """详情接口同样对涉密文档脱敏，普通用户不能从详情弹窗绕过。"""
+def test_detail_endpoint_shows_full_status_detail_for_normal_user(app):
+    """详情接口同样照常展示失败原因，涉密标记不再脱敏。"""
     uid = _user(app, "alice")
     _seed(app, uid)
     c = _login(app, "alice")
@@ -117,7 +113,7 @@ def test_detail_endpoint_redacts_restricted_path_for_normal_user(app):
     secret = next(d for d in items if d["name"] == "薪酬明细.xlsx")
     r = c.get(f"/api/v1/documents/{secret['id']}")
     assert r.status_code == 200, r.text
-    assert r.json()["status_detail"] == "（涉密目录）"
+    assert r.json()["status_detail"] == SECRET_DETAIL
 
 
 def test_admin_restricted_endpoints_manage_marks(app):

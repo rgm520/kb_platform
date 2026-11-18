@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -289,6 +290,37 @@ def route_for(restricted: bool, requested: ModelConfig,
     return requested, False
 
 
+# ================================================================ 用量统计
+def record_usage(conn: sqlite3.Connection, model_id: int, prompt_tokens: int = 0,
+                 output_tokens: int = 0, user_id: int | None = None,
+                 calls: int = 1, day: str | None = None) -> None:
+    """累加一次（或多次）模型调用。user_id=None 表示流水线/系统用量。
+
+    必须**原子累加**：Tier 2 是多线程提炼，先 SELECT 再 INSERT 会让两个
+    线程同时判定"今天还没有行"而各插一行，统计被拆散。
+    NULL user_id 在 UNIQUE(user_id, model_id, day) 里互不冲突（SQLite 的
+    NULL 不相等），所以为流水线单独建了部分唯一索引 idx_usage_pipeline。
+    """
+    day = day or time.strftime("%Y-%m-%d")
+    p, o, c = int(prompt_tokens or 0), int(output_tokens or 0), int(calls or 1)
+    add = ("calls=calls+excluded.calls, "
+           "prompt_tokens=prompt_tokens+excluded.prompt_tokens, "
+           "output_tokens=output_tokens+excluded.output_tokens")
+    if user_id is None:
+        conn.execute(
+            "INSERT INTO model_usage(user_id, model_id, day, calls, prompt_tokens,"
+            " output_tokens) VALUES (NULL,?,?,?,?,?) "
+            "ON CONFLICT(model_id, day) WHERE user_id IS NULL DO UPDATE SET " + add,
+            (model_id, day, c, p, o))
+    else:
+        conn.execute(
+            "INSERT INTO model_usage(user_id, model_id, day, calls, prompt_tokens,"
+            " output_tokens) VALUES (?,?,?,?,?,?) "
+            "ON CONFLICT(user_id, model_id, day) DO UPDATE SET " + add,
+            (user_id, model_id, day, c, p, o))
+    conn.commit()
+
+
 # ================================================================ 解析算力池
 class ParsePool:
     """文档解析（知识提炼）的模型池：本地 + 远端多个大模型，由平台调度。
@@ -308,6 +340,8 @@ class ParsePool:
         self.max_concurrency = max_concurrency or {}
         self._current: dict[int, float] = {}   # nginx 式平滑加权轮转
         self._inflight: dict[int, int] = {}
+        # Tier 2 多线程同时 pick/release，轮转游标与 inflight 计数必须串行化
+        self._lock = threading.Lock()
 
     def members(self) -> list[ModelConfig]:
         out = []
@@ -321,7 +355,22 @@ class ParsePool:
         return out
 
     def limit_of(self, m: ModelConfig) -> int:
-        return int(self.max_concurrency.get(m.id, 1))
+        """该成员允许的并发数。
+
+        优先读模型配置里的 extra.concurrency（本地 3060 显存只够 1，
+        远端机器可以给 3~4）；没配则回落到构造参数，再回落到 1。
+        """
+        configured = (m.extra or {}).get("concurrency")
+        if configured is not None:
+            try:
+                return max(1, int(configured))
+            except (TypeError, ValueError):
+                pass
+        return max(1, int(self.max_concurrency.get(m.id, 1)))
+
+    def capacity(self) -> int:
+        """池的总并发容量：提炼线程数按它来开。"""
+        return sum(self.limit_of(m) for m in self.members())
 
     def _has_room(self, m: ModelConfig) -> bool:
         return self._inflight.get(m.id, 0) < self.limit_of(m)
@@ -332,38 +381,57 @@ class ParsePool:
         用 nginx 式**平滑加权轮转**：权重 3:1 时分配序列是 A,A,A,B,A,A,A,B，
         既保证比例又不会连续把活全压给同一个成员。
         """
-        ms = self.members()
-        if not ms:
-            return None
-        free = [m for m in ms if self._has_room(m)]
-        if not free:
-            return None
-        total = sum(max(0.0, m.pool_weight) for m in free)
-        if total <= 0:
-            chosen = free[0]
-        else:
-            for m in free:
-                self._current[m.id] = self._current.get(m.id, 0.0) + max(0.0, m.pool_weight)
-            chosen = max(free, key=lambda m: self._current.get(m.id, 0.0))
-            self._current[chosen.id] = self._current.get(chosen.id, 0.0) - total
-        self._inflight[chosen.id] = self._inflight.get(chosen.id, 0) + 1
-        return chosen
+        with self._lock:
+            ms = self.members()
+            if not ms:
+                return None
+            free = [m for m in ms if self._has_room(m)]
+            if not free:
+                return None
+            total = sum(max(0.0, m.pool_weight) for m in free)
+            if total <= 0:
+                chosen = free[0]
+            else:
+                for m in free:
+                    self._current[m.id] = self._current.get(m.id, 0.0) + max(0.0, m.pool_weight)
+                chosen = max(free, key=lambda m: self._current.get(m.id, 0.0))
+                self._current[chosen.id] = self._current.get(chosen.id, 0.0) - total
+            self._inflight[chosen.id] = self._inflight.get(chosen.id, 0) + 1
+            return chosen
 
     def release(self, m: ModelConfig) -> None:
-        self._inflight[m.id] = max(0, self._inflight.get(m.id, 1) - 1)
+        with self._lock:
+            self._inflight[m.id] = max(0, self._inflight.get(m.id, 1) - 1)
 
     def status(self) -> dict:
         ms = self.members()
         fams = {}
         for m in ms:
             fams.setdefault(model_family(m.model_id), []).append(m.name)
+        # 今日真实用量：Web 进程和流水线进程是两个 ParsePool 实例，
+        # 内存里的 inflight 在管理台永远是 0；只有落到 model_usage 的
+        # 数据才能回答「远端那台今天到底干了多少活」。
+        today = time.strftime("%Y-%m-%d")
+        usage: dict[int, tuple[int, int, int]] = {}
+        try:
+            for r in self.conn.execute(
+                    "SELECT model_id, SUM(calls), SUM(prompt_tokens), SUM(output_tokens)"
+                    " FROM model_usage WHERE day=? GROUP BY model_id", (today,)):
+                usage[int(r[0])] = (int(r[1] or 0), int(r[2] or 0), int(r[3] or 0))
+        except sqlite3.OperationalError:
+            pass
         return {
             "members": [{"id": m.id, "name": m.name, "base_url": m.base_url,
                          "model_id": m.model_id, "weight": m.pool_weight,
                          "family": model_family(m.model_id),
                          "inflight": self._inflight.get(m.id, 0),
                          "limit": self.limit_of(m),
-                         "num_ctx": (m.extra or {}).get("num_ctx")} for m in ms],
+                         "num_ctx": (m.extra or {}).get("num_ctx"),
+                         "today_calls": usage.get(m.id, (0, 0, 0))[0],
+                         "today_prompt_tokens": usage.get(m.id, (0, 0, 0))[1],
+                         "today_output_tokens": usage.get(m.id, (0, 0, 0))[2]}
+                        for m in ms],
             "families": fams,
             "mixed_family": len(fams) > 1,
+            "capacity": sum(self.limit_of(m) for m in ms),
         }

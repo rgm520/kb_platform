@@ -257,6 +257,10 @@ CREATE TABLE IF NOT EXISTS jobs (
   finished_at REAL
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state);
+-- 启动补队 / 各处的 NOT EXISTS 都按 (kind, catalog_id, state) 找任务。
+-- 没有它，18.5 万 catalog × 20 万 jobs 的相关子查询实测要 390 秒，
+-- 流水线重启会卡在启动阶段迟迟不进主循环。
+CREATE INDEX IF NOT EXISTS idx_jobs_catalog ON jobs(kind, catalog_id, state);
 
 -- 审计
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -309,6 +313,10 @@ CREATE TABLE IF NOT EXISTS model_usage (
   output_tokens  INTEGER DEFAULT 0,
   UNIQUE(user_id, model_id, day)
 );
+-- 流水线（user_id 为 NULL）的用量需要单独的唯一约束才能原子累加：
+-- UNIQUE(user_id, model_id, day) 里的 NULL 互不相等，冲突永远不会触发。
+CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_pipeline
+  ON model_usage(model_id, day) WHERE user_id IS NULL;
 
 -- 答案反馈：「这个答案没用」的显式信号。只存打分与备注，不含原文。
 CREATE TABLE IF NOT EXISTS query_feedback (
@@ -368,6 +376,51 @@ def connect(db_path: str) -> sqlite3.Connection:
     except sqlite3.OperationalError:
         pass
     return conn
+
+
+# WAL 兜底阈值：超过 4GB 就主动 checkpoint。正常 checkpoint 周期下 WAL 只有
+# 几十~几百 MB，4GB 已经明显异常，留出的余量够排查又不会撑爆磁盘。
+WAL_GUARD_BYTES = 4 * 1024 ** 3
+
+
+def checkpoint_wal(conn, db_path: str, limit_bytes: int = WAL_GUARD_BYTES) -> bool:
+    """WAL 超过阈值就主动 checkpoint + 截断，返回是否已处理完（含无需处理）。
+
+    为什么需要这一层兜底：
+        SQLite 的自动 checkpoint（wal_autocheckpoint，默认 1000 页）是 PASSIVE
+        的——一旦有连接停在一个旧读事务里，checkpoint 只能复制到那个快照为止，
+        之后的帧会无限追加；而 journal_size_limit 只在 checkpoint **成功后**
+        收缩文件，拦不住增长。2026-11-17 的故障就是这样来的：提炼线程抛异常后
+        没回滚，连接一直停在旧事务里，两天 WAL 涨到 125GB 把 D 盘写满，web
+        启动时 `database is locked`，整站离线。
+
+    抢不到锁（还有别的连接持有读快照）只记日志、返回 False，下轮再试：
+    不阻塞业务，也不丢数据（截断前 WAL 里的帧始终是权威副本）。
+    """
+    wal_path = db_path + "-wal"
+    try:
+        size = os.path.getsize(wal_path)
+    except OSError:
+        return True
+    if size < limit_bytes:
+        return True
+    mb = size / 1024 ** 2
+    try:
+        row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+    except sqlite3.OperationalError as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        print(f"[db] WAL 已 {mb:.0f}MB，checkpoint 失败（下轮重试）: {e}", flush=True)
+        return False
+    busy = int(row[0]) if row else 0
+    if busy:
+        print(f"[db] WAL 已 {mb:.0f}MB，仍有连接占用，checkpoint 未完成（下轮重试）",
+              flush=True)
+        return False
+    print(f"[db] WAL 已 {mb:.0f}MB，已 checkpoint 并截断", flush=True)
+    return True
 
 
 def write_with_retry(conn, sql: str, params=(), attempts: int = 6,

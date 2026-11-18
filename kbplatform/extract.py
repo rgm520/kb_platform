@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import time
-import time
 from dataclasses import dataclass
 
 import kb.graph as pgraph
@@ -61,19 +60,66 @@ def _call_pool_member(member, prompt: str) -> tuple[dict, dict]:
     )
 
 
+# 表格类文档按行切块（实测 11,727 篇占全部块的 81%），行数据对问答价值低，
+# 默认不参与知识提炼；它们仍然被切块索引，检索/下载不受影响。
+SKIP_DETAIL = "按策略跳过知识提炼（表格类）"
+
+
+def is_skipped_ext(ext: str | None, skip_exts) -> bool:
+    if not ext or not skip_exts:
+        return False
+    e = ext.strip().lower()
+    return e in {str(s).strip().lower() for s in skip_exts}
+
+
+def mark_extract_skipped(conn, catalog_id: int) -> None:
+    """标记为「已处理但跳过提炼」。
+
+    不能只是不入队：tier2_done 会一直是 0，看板上这些文档会永远显示
+    「待提炼」。置 tier2_done=1 + status_detail 既能收口，也能在详情里解释。
+    """
+    conn.execute(
+        "UPDATE catalog SET tier2_done=1, kp_count=0, status_detail=?, updated_at=?"
+        " WHERE id=?", (SKIP_DETAIL, time.time(), catalog_id))
+    conn.commit()
+
+
+def _model_db_id(conn, model_id: str) -> int | None:
+    """把配置里的模型名对回 models.id（用量统计按 id 记）。"""
+    if not model_id:
+        return None
+    row = conn.execute("SELECT id FROM models WHERE model_id=? ORDER BY id LIMIT 1",
+                       (model_id,)).fetchone()
+    return int(row[0]) if row else None
+
+
+def _record_usage(conn, model_id: int | None, meta: dict) -> None:
+    """记一次成功调用。用量是旁路观测，写失败不能把提炼判成失败。"""
+    if not model_id:
+        return
+    try:
+        models_mod.record_usage(conn, model_id,
+                                prompt_tokens=meta.get("prompt_tokens") or 0,
+                                output_tokens=meta.get("eval_tokens") or 0)
+    except Exception as e:
+        print(f"[extract] 用量记录失败: {type(e).__name__}: {e}", flush=True)
+
+
 def extract_file(conn, catalog_id: int, unc_path: str, chunk_ids: list[int],
-                 model: str = "qwen3.5-9b-64k", pool=None) -> ExtractResult:
+                 model: str = "qwen3.5-9b-64k", pool=None, member=None) -> ExtractResult:
     """对文件的每个块做 LLM 抽取，写入 knowledge 与图谱。
 
     model   指定模型（单模型模式）。为空且给了 pool 则走**算力池**。
     pool    models_mod.ParsePool 实例；按文档分派（同一份文档固定一个成员），
             不同文档分给不同成员，吞吐叠加且每份文档内部风格一致。
+    member  已经占好的池成员。并发执行器先 pick 再派活，避免多个线程
+            同时 pick 把名额超发；传进来时由本函数负责在结束时 release。
     """
-    member = None
-    if pool is not None and not model:
+    if member is None and pool is not None and not model:
         member = pool.pick()
         if member is None:
             return ExtractResult(catalog_id, 0, 0, False, "算力池当前无可用成员（都在忙或不可用）")
+    single_id = _model_db_id(conn, model) if (member is None and model) else None
 
     n_kp = n_rel = 0
     try:
@@ -84,15 +130,17 @@ def extract_file(conn, catalog_id: int, unc_path: str, chunk_ids: list[int],
             prompt = EXTRACT_PROMPT.format(chunk=row[0])
             try:
                 if member is not None:
-                    obj, _meta = _call_pool_member(member, prompt)
+                    obj, meta = _call_pool_member(member, prompt)
                 else:
-                    obj, _meta = llm.chat_json(
+                    obj, meta = llm.chat_json(
                         prompt, schema=EXTRACTION_SCHEMA, model=model,
                         num_predict=2500, think=False, temperature=0.2)
             except Exception as e:
                 msg = f"提炼失败: {type(e).__name__}: {e}"
                 set_status(conn, catalog_id, "failed", msg)
                 return ExtractResult(catalog_id, n_kp, n_rel, False, msg)
+
+            _record_usage(conn, member.id if member is not None else single_id, meta)
 
             import json as _json
             conn.execute(

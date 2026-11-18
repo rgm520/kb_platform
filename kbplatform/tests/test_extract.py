@@ -92,6 +92,64 @@ def test_extract_failure_is_recorded_not_raised(tmp_path, monkeypatch):
     assert "结构化输出" in res.error
 
 
+def test_extract_records_model_usage(tmp_path, monkeypatch):
+    """每块提炼都要记到 model_usage，否则「是否充分调动」在平台上看不见。"""
+    import kb.llm as llm
+    import kbplatform.extract as ex
+    from kbplatform import models as M
+    conn, cid, cat = _seed(tmp_path)
+    mid = M.add_model(conn, "远端", "ollama", "http://192.0.2.77:11434",
+                      "qwen3.5:9b", in_parse_pool=True, extra={"concurrency": 2})
+    monkeypatch.setattr(M, "check_usable", lambda cfg: {"usable": True, "reason": ""})
+    monkeypatch.setattr(llm, "chat_json",
+                        lambda *a, **k: (FAKE, {"wall": 0.1, "prompt_tokens": 111,
+                                                "eval_tokens": 22}))
+    pool = M.ParsePool(conn)
+    res = ex.extract_file(conn, cat, "\\\\a.pdf", [cid], model="", pool=pool)
+    assert res.ok is True
+    row = conn.execute("SELECT user_id, model_id, calls, prompt_tokens, output_tokens"
+                       " FROM model_usage").fetchone()
+    assert row is not None, "没有写入任何用量"
+    assert row[0] is None and row[1] == mid
+    assert row[2] == 1 and row[3] == 111 and row[4] == 22
+
+
+def test_extract_records_usage_for_single_model(tmp_path, monkeypatch):
+    """没有算力池时用配置里的模型名，也要能对上 models 表里的 id。"""
+    import kb.llm as llm
+    import kbplatform.extract as ex
+    from kbplatform import models as M
+    conn, cid, cat = _seed(tmp_path)
+    mid = M.add_model(conn, "本地", "ollama", "http://localhost:11434",
+                      "qwen3.5-9b-64k")
+    monkeypatch.setattr(llm, "chat_json",
+                        lambda *a, **k: (FAKE, {"wall": 0.1, "prompt_tokens": 7,
+                                                "eval_tokens": 3}))
+    ex.extract_file(conn, cat, "\\\\a.pdf", [cid], model="qwen3.5-9b-64k")
+    row = conn.execute("SELECT model_id, calls FROM model_usage").fetchone()
+    assert row is not None and row[0] == mid and row[1] == 1
+
+
+def test_extract_uses_prepicked_member_and_releases_it(tmp_path, monkeypatch):
+    """并发执行器会先占好池成员再派活，extract_file 必须复用它并在结束时归还。"""
+    import kb.llm as llm
+    import kbplatform.extract as ex
+    from kbplatform import models as M
+    conn, cid, cat = _seed(tmp_path)
+    M.add_model(conn, "远端", "ollama", "http://192.0.2.77:11434",
+                "qwen3.5:9b", in_parse_pool=True, extra={"concurrency": 1})
+    monkeypatch.setattr(M, "check_usable", lambda cfg: {"usable": True, "reason": ""})
+    seen = {}
+    monkeypatch.setattr(llm, "chat_json",
+                        lambda *a, **k: (seen.update(k), (FAKE, {"wall": 0.1}))[1])
+    pool = M.ParsePool(conn)
+    member = pool.pick()
+    assert member is not None
+    ex.extract_file(conn, cat, "\\\\a.pdf", [cid], model="", pool=pool, member=member)
+    assert seen.get("model") == "qwen3.5:9b"
+    assert pool.pick() is not None, "预占的成员没有被归还，容量会永久少一个"
+
+
 def test_canonicalize_pending_handles_empty(tmp_path):
     from kbplatform.extract import canonicalize_pending
     conn = init_db(str(tmp_path / "kb.db"))
